@@ -499,7 +499,7 @@ class SearchIndex:
         if self._bm25 is not None and BM25_AVAILABLE:
             try:
                 tokenized = [re.findall(r'[a-z][a-z0-9_]{2,}', query.lower())]
-                results, scores = self._bm25.retrieve(tokenized, k=top_k)
+                results, scores = self._bm25.retrieve(tokenized, k=min(top_k, len(self._bm25_paths)))
                 candidates = []
                 for idx, score in zip(results[0], scores[0]):
                     if idx < len(self._bm25_paths):

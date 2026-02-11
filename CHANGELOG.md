@@ -5,6 +5,14 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.8] - 2026-02-11
+
+### Fixed
+- **Critical**: BM25 search failed silently on projects with <20 indexed files
+  - `_bm25_search()` hardcoded `k=20` which raises `ValueError` when corpus is smaller
+  - Fix: `k=min(top_k, len(self._bm25_paths))` to clamp to available documents
+  - This broke source code routing for most users in v0.5.7
+
 ## [0.5.7] - 2026-02-11
 
 ### Added
@@ -163,6 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `attnroute init` and `attnroute status` commands
 - Zero required dependencies
 
+[0.5.8]: https://github.com/jeranaias/attnroute/compare/v0.5.7...v0.5.8
 [0.5.7]: https://github.com/jeranaias/attnroute/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/jeranaias/attnroute/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/jeranaias/attnroute/compare/v0.5.4...v0.5.5
