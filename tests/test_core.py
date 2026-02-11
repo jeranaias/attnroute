@@ -1,6 +1,5 @@
 """Core functionality tests for attnroute."""
 
-from pathlib import Path
 
 import pytest
 

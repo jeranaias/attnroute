@@ -1,7 +1,6 @@
 """Tests for BurnRate plugin."""
 import json
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pytest
 

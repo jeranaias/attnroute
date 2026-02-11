@@ -1,6 +1,5 @@
 """Pytest configuration and fixtures for attnroute tests."""
 
-from pathlib import Path
 
 import pytest
 

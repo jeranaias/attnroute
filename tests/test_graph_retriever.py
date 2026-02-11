@@ -1,8 +1,6 @@
 """Tests for graph_retriever module."""
 
-from pathlib import Path
 
-import pytest
 
 
 def test_graph_available_import():

@@ -1,5 +1,4 @@
 """Tests for LoopBreaker plugin."""
-from pathlib import Path
 
 import pytest
 

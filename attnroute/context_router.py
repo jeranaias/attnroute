@@ -112,8 +112,14 @@ def ensure_search_index_built():
         if status.get("indexed_documents", 0) == 0:
             # Index is empty - build it
             docs_root = resolve_docs_root()
-            idx.build(docs_root)
+            # Include source code if enabled
+            code_roots = [Path.cwd()] if SOURCE_INDEXING_ENABLED else []
+            idx.build(docs_root, code_roots=code_roots)
+            doc_types = status.get("document_types", {})
             print(f"[attnroute] Built search index with {idx.status()['indexed_documents']} docs", file=sys.stderr)
+            if SOURCE_INDEXING_ENABLED:
+                code_count = doc_types.get("code", 0)
+                print(f"[attnroute] Source code indexing: {code_count} files indexed", file=sys.stderr)
     except Exception as e:
         print(f"[attnroute] Search index build failed: {e}", file=sys.stderr)
 
@@ -146,6 +152,18 @@ except ImportError:
     except ImportError:
         RepoMapper = None
         REPO_MAP_AVAILABLE = False
+
+# Try to import outliner for source code outline extraction
+try:
+    from attnroute.outliner import extract_outline
+    OUTLINER_AVAILABLE = True
+except ImportError:
+    try:
+        from outliner import extract_outline
+        OUTLINER_AVAILABLE = True
+    except ImportError:
+        extract_outline = None
+        OUTLINER_AVAILABLE = False
 
 # Global repo mapper (lazily initialized)
 _repo_mapper = None
@@ -329,6 +347,70 @@ LOG_KEEP_SIZE_BYTES = 25_000       # Keep this many bytes after rotation
 # Pinned files (always at least WARM) — loaded from keywords.json "pinned" field
 # Empty by default; config-driven only.
 PINNED_FILES = []
+
+# ============================================================================
+# SOURCE CODE ROUTING CONFIGURATION
+# ============================================================================
+
+# Feature flag - enables source code indexing and routing
+SOURCE_INDEXING_ENABLED = True
+
+# Source file limits (separate from doc limits to prevent crowding out docs)
+SOURCE_MAX_HOT_FILES = 2           # Max source files to inject as HOT
+SOURCE_MAX_WARM_FILES = 3          # Max source files to inject as WARM
+SOURCE_MAX_CHARS = 8000            # Max total chars for source context
+
+# Source file size limit (skip large generated/minified files)
+SOURCE_MAX_FILE_SIZE = 100_000     # 100KB - skip files larger than this
+
+# Maximum tracked source files in state (prevent unbounded growth)
+MAX_TRACKED_SOURCE_FILES = 50
+
+# Supported source file extensions
+SOURCE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs",
+    ".java", ".c", ".cpp", ".h", ".rb", ".php", ".swift", ".kt"
+}
+
+# Directories to exclude from source indexing
+SOURCE_EXCLUDED_DIRS = {
+    "node_modules", ".git", "__pycache__", "venv", ".venv",
+    "dist", "build", "target", ".next", ".nuxt", "coverage",
+    ".pytest_cache", ".mypy_cache", ".tox", "eggs", "*.egg-info"
+}
+
+
+def _is_source_file(path: str) -> bool:
+    """Check if a path is a source code file based on extension."""
+    return Path(path).suffix.lower() in SOURCE_EXTENSIONS
+
+
+def _is_doc_file(path: str, docs_root: Path = None) -> bool:
+    """Check if a path is a documentation file (under .claude/)."""
+    return path.endswith(".md") or ".claude" in path
+
+
+def _evict_lowest_source(state: dict, new_path: str, new_score: float) -> None:
+    """
+    Evict the lowest-scoring source file to make room for a new one.
+
+    Only evicts if the new file's score is higher than the lowest.
+    """
+    source_files = [(p, s) for p, s in state["scores"].items() if _is_source_file(p)]
+    if not source_files:
+        return
+
+    # Find lowest scoring source file
+    lowest_path, lowest_score = min(source_files, key=lambda x: x[1])
+
+    # Only evict if new score is higher
+    if new_score > lowest_score:
+        del state["scores"][lowest_path]
+        if lowest_path in state.get("consecutive_turns", {}):
+            del state["consecutive_turns"][lowest_path]
+        # Add the new file
+        state["scores"][new_path] = new_score
+        state["consecutive_turns"][new_path] = 0
 
 # ============================================================================
 # CONFIG LOADING
@@ -635,11 +717,28 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
             results = get_search_index().query(prompt, top_k=SEMANTIC_SEARCH_TOP_K)
             for path, relevance in results:
                 # Only activate if above minimum semantic score
-                if path in state["scores"] and relevance >= MIN_SEMANTIC_SCORE:
+                if relevance >= MIN_SEMANTIC_SCORE:
                     boost = min(1.0, relevance * SEMANTIC_BOOST_WEIGHT)
-                    if boost > state["scores"][path]:
-                        state["scores"][path] = boost
-                        directly_activated.add(path)
+                    # If path is already in state, update if higher
+                    if path in state["scores"]:
+                        if boost > state["scores"][path]:
+                            state["scores"][path] = boost
+                            directly_activated.add(path)
+                    else:
+                        # Dynamically add source files found by search
+                        # This allows state to grow organically as user works
+                        if _is_source_file(path) and SOURCE_INDEXING_ENABLED:
+                            # Check if we're at capacity for tracked source files
+                            source_count = sum(1 for p in state["scores"] if _is_source_file(p))
+                            if source_count < MAX_TRACKED_SOURCE_FILES:
+                                state["scores"][path] = boost
+                                state["consecutive_turns"][path] = 0
+                                directly_activated.add(path)
+                            else:
+                                # Evict lowest-score source file to make room
+                                _evict_lowest_source(state, path, boost)
+                                if path in state["scores"]:
+                                    directly_activated.add(path)
         except Exception:
             # Fallback to keyword activation if search fails
             _keyword_activate(state, prompt_lower, directly_activated)
@@ -843,6 +942,90 @@ def _cache_sort_key(item: tuple[str, float], state: dict) -> tuple[int, int, flo
     return (-is_pinned, -streak, -score)
 
 
+def _get_source_outline(file_path: str) -> str | None:
+    """
+    Get tree-sitter outline for a source file.
+
+    Returns outline string or None if unavailable.
+    Falls back to first 50 lines if outliner unavailable.
+    """
+    if not _is_source_file(file_path):
+        return None
+
+    full_path = Path.cwd() / file_path
+    if not full_path.exists():
+        # Try as absolute path
+        full_path = Path(file_path)
+        if not full_path.exists():
+            return None
+
+    # Check file size limit
+    try:
+        if full_path.stat().st_size > SOURCE_MAX_FILE_SIZE:
+            return None
+    except Exception:
+        return None
+
+    # Try tree-sitter outline first
+    if OUTLINER_AVAILABLE and extract_outline:
+        try:
+            outline = extract_outline(full_path)
+            if outline:
+                return outline
+        except Exception:
+            pass
+
+    # Fallback: first 50 lines
+    try:
+        content = full_path.read_text(encoding='utf-8', errors='replace')
+        lines = content.split('\n')[:50]
+        if len(content.split('\n')) > 50:
+            lines.append("\n... [Source file truncated - use Read for full content] ...")
+        return '\n'.join(lines)
+    except Exception:
+        return None
+
+
+def _get_source_summary(file_path: str) -> str | None:
+    """
+    Get a one-line summary for WARM source files.
+
+    Extracts first docstring or comment from the file.
+    """
+    full_path = Path.cwd() / file_path
+    if not full_path.exists():
+        full_path = Path(file_path)
+        if not full_path.exists():
+            return None
+
+    try:
+        content = full_path.read_text(encoding='utf-8', errors='replace')
+        lines = content.split('\n')
+
+        # Look for docstring or comment in first 10 lines
+        for line in lines[:10]:
+            stripped = line.strip()
+            # Python docstring
+            if stripped.startswith('"""') or stripped.startswith("'''"):
+                doc = stripped.strip('"\'').strip()
+                if doc:
+                    return doc[:100]
+            # Multi-line comment start
+            if stripped.startswith('/*'):
+                doc = stripped.lstrip('/*').strip()
+                if doc:
+                    return doc[:100]
+            # Single-line comment
+            if stripped.startswith('//') or stripped.startswith('#'):
+                doc = stripped.lstrip('/#').strip()
+                if doc and not doc.startswith('!'):  # Skip shebang
+                    return doc[:100]
+
+        return f"Source file: {Path(file_path).suffix} ({len(lines)} lines)"
+    except Exception:
+        return None
+
+
 def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
     """
     Build tiered context output respecting limits.
@@ -851,6 +1034,9 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
     - Pinned files first (always present → always in cache prefix)
     - Then by consecutive_turns streak (longest streak = most stable = best cache hit)
     - Then by score (tiebreaker)
+
+    Source files get tree-sitter outlines, not full content injection.
+    Doc files get full content (HOT) or compressed TOC (WARM).
 
     Returns (output_string, stats_dict).
     """
@@ -861,52 +1047,67 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
         reverse=True
     )
 
-    # Separate files into tiers first, then sort within each tier
-    hot_candidates = []
-    warm_candidates = []
-    stats = {"hot": 0, "warm": 0, "cold": 0}
+    # Separate files into tiers AND by type (doc vs source)
+    hot_docs = []
+    hot_sources = []
+    warm_docs = []
+    warm_sources = []
+    stats = {"hot": 0, "warm": 0, "cold": 0, "hot_src": 0, "warm_src": 0}
     total_chars = 0
+    source_chars = 0
 
     for file_path, score in sorted_files:
         tier = get_tier(score)
+        is_source = _is_source_file(file_path)
+
         if tier == "HOT":
-            hot_candidates.append((file_path, score))
+            if is_source:
+                hot_sources.append((file_path, score))
+            else:
+                hot_docs.append((file_path, score))
         elif tier == "WARM":
-            warm_candidates.append((file_path, score))
+            if is_source:
+                warm_sources.append((file_path, score))
+            else:
+                warm_docs.append((file_path, score))
         else:
             stats["cold"] += 1
 
-    # Sort HOT files for prompt cache stability:
-    # Pinned first, then longest streak, then highest score
-    # This keeps the prefix stable across turns → better API cache hits
-    hot_candidates.sort(key=lambda item: _cache_sort_key(item, state))
-    hot_candidates = hot_candidates[:MAX_HOT_FILES]
+    # Sort for prompt cache stability
+    hot_docs.sort(key=lambda item: _cache_sort_key(item, state))
+    hot_docs = hot_docs[:MAX_HOT_FILES]
 
-    # Sort WARM files similarly for stability
-    warm_candidates.sort(key=lambda item: _cache_sort_key(item, state))
-    warm_candidates = warm_candidates[:MAX_WARM_FILES]
+    warm_docs.sort(key=lambda item: _cache_sort_key(item, state))
+    warm_docs = warm_docs[:MAX_WARM_FILES]
+
+    # Limit source files separately
+    hot_sources.sort(key=lambda item: _cache_sort_key(item, state))
+    hot_sources = hot_sources[:SOURCE_MAX_HOT_FILES]
+
+    warm_sources.sort(key=lambda item: _cache_sort_key(item, state))
+    warm_sources = warm_sources[:SOURCE_MAX_WARM_FILES]
 
     hot_blocks = []
     warm_blocks = []
+    source_blocks = []
     repo_map_block = None
 
     # Try to get repo map for symbol-level context (Aider-style efficiency)
     mapper = get_repo_mapper() if REPO_MAP_AVAILABLE else None
 
-    # SMART INJECTION STRATEGY:
-    # 1. First HOT file: full content (highest priority)
-    # 2. Additional HOT files: repo map only (symbol-level)
-    # 3. WARM files: headers only
-    # This matches Aider's approach for 80%+ token reduction
+    # === DOC FILES ===
+    # SMART INJECTION STRATEGY for docs:
+    # 1. First HOT doc: full content
+    # 2. Additional HOT docs: repo map only (symbol-level)
+    # 3. WARM docs: headers only
 
     first_hot = True
     hot_files_for_repomap = []
 
-    for file_path, score in hot_candidates:
+    for file_path, score in hot_docs:
         streak = state.get("consecutive_turns", {}).get(file_path, 0)
 
         if first_hot:
-            # First HOT file gets full content
             content = get_full_content(file_path, docs_root)
             if content and total_chars + len(content) < MAX_TOTAL_CHARS:
                 hot_blocks.append(f"─── [HOT] {file_path} (score: {score:.2f}, streak: {streak}) ───\n{content}")
@@ -914,18 +1115,15 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
                 stats["hot"] += 1
                 first_hot = False
             elif content:
-                # Demote to repo map if too large
                 hot_files_for_repomap.append(file_path)
                 stats["hot"] += 1
         else:
-            # Other HOT files: use repo map instead of full content
             hot_files_for_repomap.append(file_path)
             stats["hot"] += 1
 
-    # Generate repo map for additional hot files (massive token savings)
+    # Generate repo map for additional hot doc files
     if mapper and hot_files_for_repomap:
         try:
-            # Budget for repo map section
             repo_map_content = mapper.get_context_for_files(
                 hot_files_for_repomap,
                 include_related=True,
@@ -937,7 +1135,7 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
         except Exception as e:
             print(f"[attnroute] Repo map generation failed: {e}", file=sys.stderr)
 
-    for file_path, score in warm_candidates:
+    for file_path, score in warm_docs:
         if stats["warm"] >= MAX_WARM_FILES:
             break
         header = extract_warm_header(file_path, docs_root)
@@ -946,31 +1144,67 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
             total_chars += len(header)
             stats["warm"] += 1
 
+    # === SOURCE FILES ===
+    # HOT sources: inject tree-sitter outline (not full content!)
+    # WARM sources: inject file path + one-line summary
+
+    for file_path, score in hot_sources:
+        if source_chars >= SOURCE_MAX_CHARS:
+            break
+        outline = _get_source_outline(file_path)
+        if outline and source_chars + len(outline) < SOURCE_MAX_CHARS:
+            source_blocks.append(f"─── [HOT:SRC] {file_path} (score: {score:.2f}) ───\n{outline}")
+            source_chars += len(outline)
+            stats["hot_src"] += 1
+
+    for file_path, score in warm_sources:
+        if source_chars >= SOURCE_MAX_CHARS:
+            break
+        summary = _get_source_summary(file_path)
+        if summary:
+            line = f"─── [WARM:SRC] {file_path} (score: {score:.2f}) ───\n{summary}"
+            if source_chars + len(line) < SOURCE_MAX_CHARS:
+                source_blocks.append(line)
+                source_chars += len(line)
+                stats["warm_src"] += 1
+
+    # Add source chars to total
+    total_chars += source_chars
+
     # Combine output
     output_parts = []
 
-    # Status header (joined with \n so the box stays compact)
+    # Status header
     turn_label = f"Turn {state['turn_count']}"
     tier_line = f"Hot: {stats['hot']}  Warm: {stats['warm']}  Cold: {stats['cold']}"
+    src_line = f"Src: {stats['hot_src']}H/{stats['warm_src']}W" if (stats['hot_src'] + stats['warm_src']) > 0 else ""
     chars_line = f"Chars: {total_chars:,} / {MAX_TOTAL_CHARS:,}"
-    header_w = max(len(turn_label), len(tier_line), len(chars_line)) + 4
-    header = "\n".join([
+    header_w = max(len(turn_label), len(tier_line), len(chars_line), len(src_line)) + 4
+    header_lines = [
         f"┌─ {turn_label} {'─' * (header_w - len(turn_label) - 3)}┐",
         f"│ {tier_line:<{header_w - 2}} │",
+    ]
+    if src_line:
+        header_lines.append(f"│ {src_line:<{header_w - 2}} │")
+    header_lines.extend([
         f"│ {chars_line:<{header_w - 2}} │",
         f"└{'─' * header_w}┘",
     ])
+    header = "\n".join(header_lines)
     output_parts.append(header)
 
-    # Hot files first (stable order for cache)
+    # Hot doc files first (stable order for cache)
     output_parts.extend(hot_blocks)
 
-    # Repo map for additional hot files (symbol-level context)
+    # Repo map for additional hot doc files
     if repo_map_block:
         output_parts.append(repo_map_block)
 
-    # Then warm files (compressed TOC)
+    # Warm doc files
     output_parts.extend(warm_blocks)
+
+    # Source files (with [HOT:SRC] / [WARM:SRC] labels)
+    output_parts.extend(source_blocks)
 
     return "\n\n".join(output_parts), stats
 

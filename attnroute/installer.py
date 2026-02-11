@@ -152,6 +152,71 @@ def build_hook_command(module_name: str, python_cmd: str) -> str:
     return f'{python_cmd} -m attnroute.{module_name}'
 
 
+def merge_hooks(existing_hooks: dict, new_hooks: dict) -> dict:
+    """
+    Merge new hooks into existing hooks with per-event deduplication.
+
+    For each event (UserPromptSubmit, SessionStart, Stop, etc.):
+    - Keeps all existing hooks that don't conflict with new hooks
+    - Adds new hooks, deduplicating by command string
+    - Preserves existing matchers and other hook properties
+
+    Returns merged hooks dict.
+    """
+    merged = {}
+
+    # Get all event types from both
+    all_events = set(existing_hooks.keys()) | set(new_hooks.keys())
+
+    for event in all_events:
+        existing_groups = existing_hooks.get(event, [])
+        new_groups = new_hooks.get(event, [])
+
+        # Extract all existing commands for deduplication
+        existing_commands = set()
+        for group in existing_groups:
+            for hook in group.get("hooks", []):
+                cmd = hook.get("command", "") if isinstance(hook, dict) else hook
+                if cmd:
+                    existing_commands.add(cmd)
+
+        # Start with existing groups
+        merged_groups = []
+        for group in existing_groups:
+            merged_groups.append(group.copy())
+
+        # Add new hooks that don't already exist
+        for new_group in new_groups:
+            new_hooks_to_add = []
+            for hook in new_group.get("hooks", []):
+                cmd = hook.get("command", "") if isinstance(hook, dict) else hook
+                if cmd and cmd not in existing_commands:
+                    new_hooks_to_add.append(hook)
+                    existing_commands.add(cmd)
+
+            if new_hooks_to_add:
+                # Check if we can add to an existing group with same matcher
+                new_matcher = new_group.get("matcher")
+                added_to_existing = False
+
+                for merged_group in merged_groups:
+                    if merged_group.get("matcher") == new_matcher:
+                        merged_group["hooks"] = merged_group.get("hooks", []) + new_hooks_to_add
+                        added_to_existing = True
+                        break
+
+                if not added_to_existing:
+                    # Create a new group
+                    new_group_copy = new_group.copy()
+                    new_group_copy["hooks"] = new_hooks_to_add
+                    merged_groups.append(new_group_copy)
+
+        if merged_groups:
+            merged[event] = merged_groups
+
+    return merged
+
+
 def build_settings(python_cmd: str, use_entry_points: bool = False, include_pool: bool = True) -> dict:
     """Build the Claude Code settings.json hook configuration."""
     hooks = {
@@ -378,6 +443,10 @@ def main():
     if SETTINGS_FILE.exists():
         try:
             existing = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            # Create backup before modifying
+            backup_file = SETTINGS_FILE.with_suffix(".json.bak")
+            backup_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            print(f"  Backup: {backup_file}")
         except Exception:
             pass
 
@@ -386,6 +455,11 @@ def main():
 
     # Build new settings
     new_settings = build_settings(python_cmd, use_entry_points, include_pool=has_pool)
+
+    # Merge hooks with existing hooks (preserves user's other hooks)
+    existing_hooks = existing.get("hooks", {})
+    new_hooks = new_settings.get("hooks", {})
+    new_settings["hooks"] = merge_hooks(existing_hooks, new_hooks)
 
     # Merge with existing non-hook settings
     for key, value in existing.items():

@@ -5,6 +5,24 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-02-11
+
+### Added
+- **Source Code Routing** - Search index now covers the actual project source tree, not just `.claude/*.md` docs
+  - Source files matched by BM25 search get tree-sitter outline injection (function signatures, class definitions, imports) — not raw file content
+  - No `keywords.json` required for source routing — BM25 handles discovery automatically from the prompt
+  - Separate limits for source context: `SOURCE_MAX_HOT_FILES=2`, `SOURCE_MAX_WARM_FILES=3`, `SOURCE_MAX_CHARS=8000`
+  - Large files (>100KB) and excluded directories (node_modules, .git, __pycache__, venv, dist, build, target) are skipped
+  - State dynamically grows when search finds new source files (capped at 50 tracked source files)
+  - `.claude/*.md` doc routing continues to work exactly as before — source routing is additive
+- Visual distinction in output: `[HOT:SRC]` and `[WARM:SRC]` labels for source context blocks
+
+### Fixed
+- **Hooks overwrite bug** - `attnroute init` now properly merges hooks per-event instead of replacing all existing hooks
+  - Previous behavior destroyed user's other hooks (e.g., linters, formatters)
+  - Now deduplicates by command string and preserves existing hook configurations
+  - Creates `settings.json.bak` backup before modifying
+
 ## [0.5.6] - 2026-02-10
 
 ### Fixed
@@ -145,6 +163,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `attnroute init` and `attnroute status` commands
 - Zero required dependencies
 
+[0.5.7]: https://github.com/jeranaias/attnroute/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/jeranaias/attnroute/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/jeranaias/attnroute/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/jeranaias/attnroute/compare/v0.5.3...v0.5.4

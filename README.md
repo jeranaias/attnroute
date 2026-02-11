@@ -68,6 +68,8 @@ attnroute is a **hook system for [Claude Code](https://github.com/anthropics/cla
 
 **The core innovation**: attnroute maintains a "working memory" of your codebase—tracking which files you interact with, learning co-activation patterns, and using PageRank on dependency graphs to rank importance.
 
+**v0.5.7 adds source code routing**: The search index now covers your actual source tree, not just `.claude/*.md` docs. Source files matched by BM25 get tree-sitter outline injection (function signatures, class definitions, imports)—not raw file content. No config needed—just works.
+
 ### Verified Performance
 
 | Metric | Value |
@@ -139,6 +141,8 @@ attnroute transforms Claude Code from a "read everything" approach to a "read wh
 ### Key Features
 
 - **Zero-config installation**: `pip install attnroute[all] && attnroute init`
+- **Source code routing**: Search index covers your actual source tree, not just docs
+- **Smart injection**: Docs get full content, source files get tree-sitter outlines
 - **Invisible operation**: Works in the background via Claude Code hooks
 - **Graceful degradation**: Falls back gracefully if optional dependencies unavailable
 - **Cross-platform**: Windows, macOS, Linux
@@ -186,17 +190,20 @@ Claude's Context Window: 200K tokens (Sonnet) / 128K tokens (Haiku)
 │  You: "Fix the bug in the auth module"                      │
 ├─────────────────────────────────────────────────────────────┤
 │  attnroute injects:                                         │
-│    HOT:  auth.py (full content, 500 tokens)                 │
-│          session.py (full content, 300 tokens)              │
-│    WARM: middleware.py (symbols only, 50 tokens)            │
-│          routes.py (symbols only, 40 tokens)                │
+│    HOT:      docs/auth-guide.md (full content, 400 tokens)  │
+│    WARM:     docs/api-reference.md (TOC, 100 tokens)        │
+│    HOT:SRC   src/auth.py (outline: signatures, 120 tokens)  │
+│    WARM:SRC  src/session.py (summary, 30 tokens)            │
 │    ───────────────────────────────────────────              │
-│    Total: 890 tokens (not 1.5 million)                      │
+│    Total: ~650 tokens (not 1.5 million)                     │
 ├─────────────────────────────────────────────────────────────┤
-│  Result: "I see the bug in auth.py line 47. The session     │
-│          validation is missing the expiry check..."         │
+│  Result: "I see the auth module outline. The authenticate() │
+│          function needs the expiry check. Let me Read the   │
+│          full file and fix it..."                           │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Key insight**: Source files get **outlines** (function signatures, class defs, imports), not full content. Claude's Read tool handles full content when needed—attnroute gives it the map.
 
 ---
 

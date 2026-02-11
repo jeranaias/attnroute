@@ -1,5 +1,4 @@
 """Tests for VerifyFirst plugin."""
-from pathlib import Path
 
 import pytest
 

@@ -37,6 +37,19 @@ except ImportError:
 # Index storage location
 INDEX_DB = TELEMETRY_DIR / "search_index.db"
 
+# Source file configuration
+SOURCE_MAX_FILE_SIZE = 100_000  # 100KB - skip files larger than this
+SOURCE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs",
+    ".java", ".c", ".cpp", ".h", ".rb", ".php", ".swift", ".kt"
+}
+SOURCE_EXCLUDED_DIRS = {
+    "node_modules", ".git", "__pycache__", "venv", ".venv",
+    "dist", "build", "target", ".next", ".nuxt", "coverage",
+    ".pytest_cache", ".mypy_cache", ".tox", "eggs", ".egg-info",
+    ".cache", "vendor", "bower_components"
+}
+
 # ============================================================================
 # DEPENDENCY DETECTION
 # ============================================================================
@@ -229,6 +242,17 @@ class SearchIndex:
                 self._model = False  # Mark as failed
         return self._model if self._model else None
 
+    def _should_skip_path(self, file_path: Path) -> bool:
+        """Check if a path should be skipped based on excluded directories."""
+        path_str = str(file_path)
+        for excluded in SOURCE_EXCLUDED_DIRS:
+            # Check if any path component matches the excluded dir
+            if f"/{excluded}/" in path_str or f"\\{excluded}\\" in path_str:
+                return True
+            if path_str.endswith(f"/{excluded}") or path_str.endswith(f"\\{excluded}"):
+                return True
+        return False
+
     def build(self, docs_root: Path, code_roots: list[Path] = None):
         """
         Full index rebuild.
@@ -259,27 +283,60 @@ class SearchIndex:
                     continue
 
         # Index code files with outlines
-        if OUTLINER_AVAILABLE:
-            for code_root in code_roots:
-                if not code_root.exists():
-                    continue
-                for ext in ["*.py", "*.js", "*.ts", "*.tsx", "*.go", "*.rs", "*.java"]:
-                    for code_file in code_root.rglob(ext):
-                        if code_file.name.startswith(".") or "node_modules" in str(code_file):
+        for code_root in code_roots:
+            if not code_root.exists():
+                continue
+
+            # Iterate over supported source extensions
+            for ext in SOURCE_EXTENSIONS:
+                pattern = f"*{ext}"
+                for code_file in code_root.rglob(pattern):
+                    # Skip hidden files
+                    if code_file.name.startswith("."):
+                        continue
+
+                    # Skip excluded directories
+                    if self._should_skip_path(code_file):
+                        continue
+
+                    # Skip large files (generated code, minified bundles, etc.)
+                    try:
+                        file_size = code_file.stat().st_size
+                        if file_size > SOURCE_MAX_FILE_SIZE:
                             continue
-                        try:
-                            outline = extract_outline(code_file)
-                            if outline:
-                                rel_path = str(code_file.relative_to(code_root))
-                                documents.append({
-                                    "path": rel_path,
-                                    "content": outline,
-                                    "outline": outline,
-                                    "mtime": code_file.stat().st_mtime,
-                                    "doc_type": "code"
-                                })
-                        except Exception:
-                            continue
+                    except Exception:
+                        continue
+
+                    try:
+                        rel_path = str(code_file.relative_to(code_root))
+
+                        # Try to get outline if available
+                        outline = ""
+                        if OUTLINER_AVAILABLE:
+                            try:
+                                outline = extract_outline(code_file) or ""
+                            except Exception:
+                                pass
+
+                        # If no outline, use first portion of content for indexing
+                        if not outline:
+                            try:
+                                content = code_file.read_text(encoding="utf-8", errors="replace")
+                                # Use first 2000 chars for search indexing
+                                outline = content[:2000]
+                            except Exception:
+                                continue
+
+                        if outline:
+                            documents.append({
+                                "path": rel_path,
+                                "content": outline,
+                                "outline": outline,
+                                "mtime": code_file.stat().st_mtime,
+                                "doc_type": "code"
+                            })
+                    except Exception:
+                        continue
 
         # Store in SQLite
         with sqlite3.connect(self.db_path) as conn:
@@ -295,7 +352,9 @@ class SearchIndex:
         # Rebuild in-memory index
         self._build_memory_index(documents)
 
-        print(f"[indexer] Indexed {len(documents)} documents", file=sys.stderr)
+        md_count = sum(1 for d in documents if d["doc_type"] == "markdown")
+        code_count = sum(1 for d in documents if d["doc_type"] == "code")
+        print(f"[indexer] Indexed {len(documents)} documents ({md_count} docs, {code_count} source)", file=sys.stderr)
 
     def update_incremental(self, docs_root: Path, code_roots: list[Path] = None):
         """Re-index only changed files (mtime check)."""
@@ -325,6 +384,49 @@ class SearchIndex:
                             updated += 1
                     except Exception:
                         continue
+
+            # Check source files
+            for code_root in code_roots:
+                if not code_root.exists():
+                    continue
+
+                for ext in SOURCE_EXTENSIONS:
+                    pattern = f"*{ext}"
+                    for code_file in code_root.rglob(pattern):
+                        if code_file.name.startswith("."):
+                            continue
+                        if self._should_skip_path(code_file):
+                            continue
+
+                        try:
+                            file_size = code_file.stat().st_size
+                            if file_size > SOURCE_MAX_FILE_SIZE:
+                                continue
+
+                            rel_path = str(code_file.relative_to(code_root))
+                            current_mtime = code_file.stat().st_mtime
+
+                            if rel_path not in existing or existing[rel_path] < current_mtime:
+                                # Get outline or content
+                                outline = ""
+                                if OUTLINER_AVAILABLE:
+                                    try:
+                                        outline = extract_outline(code_file) or ""
+                                    except Exception:
+                                        pass
+
+                                if not outline:
+                                    content = code_file.read_text(encoding="utf-8", errors="replace")
+                                    outline = content[:2000]
+
+                                if outline:
+                                    conn.execute("""
+                                        INSERT OR REPLACE INTO documents (path, content, outline, mtime, doc_type, indexed_at)
+                                        VALUES (?, ?, ?, ?, ?, ?)
+                                    """, (rel_path, outline, outline, current_mtime, "code", datetime.now().isoformat()))
+                                    updated += 1
+                        except Exception:
+                            continue
 
             conn.commit()
 
