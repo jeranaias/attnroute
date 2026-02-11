@@ -7,9 +7,7 @@ Plugins are discovered via:
 3. Built-in plugins (verifyfirst)
 """
 import json
-import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Type
 
 from attnroute.plugins.base import AttnroutePlugin
 
@@ -26,12 +24,8 @@ def discover_plugins() -> None:
 
     # Method 1: Entry points (pip installed plugins)
     try:
-        if sys.version_info >= (3, 10):
-            from importlib.metadata import entry_points
-            eps = entry_points(group="attnroute.plugins")
-        else:
-            from importlib.metadata import entry_points
-            eps = entry_points().get("attnroute.plugins", [])
+        from importlib.metadata import entry_points
+        eps = entry_points(group="attnroute.plugins")
 
         for ep in eps:
             try:

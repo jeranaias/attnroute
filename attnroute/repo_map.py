@@ -22,14 +22,12 @@ Usage:
 
 import re
 import sys
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
 
 # Try to import tree-sitter
 try:
-    from tree_sitter_languages import get_language, get_parser
+    from tree_sitter_languages import get_language, get_parser  # noqa: F401
     TREE_SITTER_AVAILABLE = True
 except ImportError:
     TREE_SITTER_AVAILABLE = False

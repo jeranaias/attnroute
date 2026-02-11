@@ -17,13 +17,11 @@ Search pipeline:
   3. Final score: 0.6 * bm25_norm + 0.4 * cosine_sim
 """
 
-import json
 import re
 import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 try:
     from attnroute.telemetry_lib import TELEMETRY_DIR, windows_utf8_io

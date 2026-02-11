@@ -15,7 +15,6 @@ Includes Context Confidence Self-Evaluation:
 Hook: Stop
 """
 import json
-import os
 import subprocess
 import sys
 from datetime import datetime
@@ -25,9 +24,7 @@ try:
     from attnroute.telemetry_lib import (
         TELEMETRY_DIR,
         TURNS_FILE,
-        atomic_jsonl_append,
         ensure_telemetry_dir,
-        get_session_id,
         load_session_state,
         rotate_jsonl,
         save_session_state,
@@ -39,10 +36,8 @@ except ImportError:
         sys.path.insert(0, str(Path(__file__).parent))
         from telemetry_lib import (
             TELEMETRY_DIR,
-            TURNS_FILE,
-            atomic_jsonl_append,
+            TURNS_FILE,  # noqa: F401
             ensure_telemetry_dir,
-            get_session_id,
             load_session_state,
             rotate_jsonl,
             save_session_state,
@@ -332,7 +327,6 @@ def get_confidence_summary() -> str:
     if len(trend) < 3:
         return ""
 
-    current = trend[-1] if trend else 0
     # Calculate previous average (before last 3 entries)
     if len(trend) > 3:
         prev_avg = sum(trend[:-3]) / len(trend[:-3])

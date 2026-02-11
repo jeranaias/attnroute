@@ -13,7 +13,6 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from attnroute.plugins.base import AttnroutePlugin
 
@@ -291,7 +290,6 @@ class LoopBreakerPlugin(AttnroutePlugin):
 
             max_count = max(sig_counts.values())
             if max_count >= self.LOOP_THRESHOLD:
-                most_common = max(sig_counts, key=sig_counts.get)
                 return {
                     "file": file,
                     "count": max_count,

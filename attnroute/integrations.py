@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # Try to import attnroute modules
 try:
@@ -551,7 +551,7 @@ def main():
     import_parser.add_argument("--input", type=Path, required=True, help="Input file")
 
     # Status command
-    status_parser = subparsers.add_parser("status", help="Show integration status")
+    subparsers.add_parser("status", help="Show integration status")
 
     args = parser.parse_args()
 

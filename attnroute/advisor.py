@@ -19,7 +19,6 @@ import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
 
 try:
     from attnroute.telemetry_lib import (

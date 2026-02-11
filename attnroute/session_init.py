@@ -62,11 +62,11 @@ def detect_project_switch():
         attn_file = ATTN_STATE_PROJECT
         if attn_file.exists():
             try:
-                attn = json.loads(attn_file.read_text())
+                attn = json.loads(attn_file.read_text(encoding='utf-8'))
                 for key in attn.get("scores", {}):
                     attn["scores"][key] = 0.0
                 attn["turn_count"] = 0
-                attn_file.write_text(json.dumps(attn, indent=2))
+                attn_file.write_text(json.dumps(attn, indent=2), encoding='utf-8')
                 print(f"[telemetry] Project switch: {prev} -> {current}, attention reset", file=sys.stderr)
             except Exception:
                 pass
@@ -83,7 +83,7 @@ def detect_project_switch():
             if warmup and ATTN_STATE_PROJECT.parent.exists():
                 attn_file = ATTN_STATE_PROJECT
                 try:
-                    attn = json.loads(attn_file.read_text()) if attn_file.exists() else {"scores": {}, "consecutive_turns": {}, "turn_count": 0}
+                    attn = json.loads(attn_file.read_text(encoding='utf-8')) if attn_file.exists() else {"scores": {}, "consecutive_turns": {}, "turn_count": 0}
                     applied = 0
                     for f, warmup_score in warmup.items():
                         if f in attn.get("scores", {}):
@@ -92,7 +92,7 @@ def detect_project_switch():
                                 attn["scores"][f] = warmup_score
                                 applied += 1
                     if applied:
-                        attn_file.write_text(json.dumps(attn, indent=2))
+                        attn_file.write_text(json.dumps(attn, indent=2), encoding='utf-8')
                         print(f"[attnroute] Session warm-start: {applied} files pre-warmed from previous session", file=sys.stderr)
                 except Exception:
                     pass
@@ -126,8 +126,6 @@ def build_dashboard() -> str:
     if turns:
         waste_ratios = [t["waste_ratio"] for t in turns if t.get("waste_ratio", -1) >= 0]
         notif_count = sum(1 for t in turns if t.get("was_notification"))
-        total_inj = sum(t.get("injection_chars", 0) for t in turns)
-        notif_saved = sum(t.get("injection_chars", 0) for t in turns if t.get("was_notification") and t.get("injection_chars", 0) == 0)
 
         avg_waste = sum(waste_ratios) / len(waste_ratios) if waste_ratios else -1
         notif_pct = (notif_count / len(turns) * 100) if turns else 0

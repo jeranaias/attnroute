@@ -5,6 +5,32 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-02-10
+
+### Fixed
+- **C1**: `UnboundLocalError` in notification clamping — added `global` declaration
+  for `MAX_HOT_FILES`, `MAX_WARM_FILES`, `MAX_TOTAL_CHARS` in `main()`
+- **C2**: `AttributeError` if Learner init fails — added None guard for `get_learner()`
+  at module level
+- **C3**: Double `sys.stdin.read()` breaking fallback path — now buffers stdin before
+  parsing JSON
+- **C4**: `ingest.py` hardcoded import — added dual import fallback pattern with
+  inline normalize_path fallback
+- **H1**: Telemetry project identity mismatch — `record_turn_telemetry()` now uses
+  `get_project()` for worktree-aware project identity
+- **H2**: Non-atomic state file writes — `save_state()` now uses temp file + replace
+  pattern to prevent corruption on interrupted writes
+- **H3**: Missing `encoding='utf-8'` on 11 file I/O calls causing Windows encoding
+  issues with non-ASCII content
+- **H4**: `load_telemetry_overrides()` log spam — moved log statement inside cache-miss
+  branch so it only prints when values actually change
+- **M1**: `FilePredictor` eager instantiation — now uses `LazyLoader` like Learner
+  and SearchIndex for consistent lazy initialization
+- **M2/M3**: Installer suggested wrong pip package name (`tree-sitter-language-pack`
+  instead of `tree-sitter-languages`)
+- Version sync test now works on Python 3.10 (uses regex fallback instead of
+  tomllib which is 3.11+ only)
+
 ## [0.5.5] - 2026-02-10
 
 ### Fixed
@@ -119,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `attnroute init` and `attnroute status` commands
 - Zero required dependencies
 
+[0.5.6]: https://github.com/jeranaias/attnroute/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/jeranaias/attnroute/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/jeranaias/attnroute/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/jeranaias/attnroute/compare/v0.5.2...v0.5.3

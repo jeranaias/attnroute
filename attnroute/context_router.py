@@ -36,7 +36,6 @@ if sys.stderr.encoding != 'utf-8':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple
 
 # Import utilities for cleaner import handling
 from attnroute.compat import LazyLoader, try_import
@@ -44,11 +43,12 @@ from attnroute.compat import LazyLoader, try_import
 # Import telemetry lib
 _telemetry_imports, TELEMETRY_LIB_AVAILABLE = try_import(
     "attnroute.telemetry_lib", "telemetry_lib",
-    ["estimate_tokens_from_chars", "get_session_id", "load_project_overrides", "rotate_jsonl"]
+    ["estimate_tokens_from_chars", "get_session_id", "get_project", "load_project_overrides", "rotate_jsonl"]
 )
 if TELEMETRY_LIB_AVAILABLE:
     estimate_tokens_from_chars = _telemetry_imports["estimate_tokens_from_chars"]
     get_session_id = _telemetry_imports["get_session_id"]
+    get_project = _telemetry_imports["get_project"]
     load_project_overrides = _telemetry_imports["load_project_overrides"]
     rotate_jsonl = _telemetry_imports["rotate_jsonl"]
 
@@ -117,19 +117,23 @@ def ensure_search_index_built():
     except Exception as e:
         print(f"[attnroute] Search index build failed: {e}", file=sys.stderr)
 
-# Try to import file predictor (optional prefetching)
-try:
-    from attnroute.predictor import FilePredictor
-    _predictor = FilePredictor()
+# Try to import file predictor with lazy initialization (optional prefetching)
+_predictor_imports, _PREDICTOR_IMPORTABLE = try_import(
+    "attnroute.predictor", "predictor", ["FilePredictor"]
+)
+if _PREDICTOR_IMPORTABLE:
+    FilePredictor = _predictor_imports["FilePredictor"]
+    _predictor_loader = LazyLoader(lambda: FilePredictor())
     PREDICTOR_AVAILABLE = True
-except ImportError:
-    try:
-        from predictor import FilePredictor
-        _predictor = FilePredictor()
-        PREDICTOR_AVAILABLE = True
-    except ImportError:
-        _predictor = None
-        PREDICTOR_AVAILABLE = False
+else:
+    _predictor_loader = None
+    PREDICTOR_AVAILABLE = False
+
+def get_predictor():
+    """Get the lazily-initialized FilePredictor instance."""
+    if _predictor_loader is None:
+        return None
+    return _predictor_loader.get()
 
 # Try to import repo mapper for symbol-level context (Aider-style)
 try:
@@ -347,7 +351,7 @@ def load_keyword_config() -> tuple[dict[str, list[str]], dict[str, list[str]], l
     for config_path in config_paths:
         if config_path.exists():
             try:
-                config = json.loads(config_path.read_text())
+                config = json.loads(config_path.read_text(encoding='utf-8'))
                 keywords = config.get("keywords", {})
                 co_activation = config.get("co_activation", {})
                 pinned = config.get("pinned", [])
@@ -420,13 +424,15 @@ CO_ACTIVATION = build_bidirectional_coactivation(CO_ACTIVATION)
 
 # Merge learned co-activation from the intelligence engine
 if LEARNER_AVAILABLE:
-    _learned_coact = get_learner().get_learned_coactivation()
-    for source, targets in _learned_coact.items():
-        if source not in CO_ACTIVATION:
-            CO_ACTIVATION[source] = []
-        for t in targets:
-            if t not in CO_ACTIVATION[source]:
-                CO_ACTIVATION[source].append(t)
+    _learner_instance = get_learner()
+    if _learner_instance is not None:  # C2: Guard against None if Learner init fails
+        _learned_coact = _learner_instance.get_learned_coactivation()
+        for source, targets in _learned_coact.items():
+            if source not in CO_ACTIVATION:
+                CO_ACTIVATION[source] = []
+            for t in targets:
+                if t not in CO_ACTIVATION[source]:
+                    CO_ACTIVATION[source].append(t)
 
 # Build networkx graph for transitive co-activation (2-hop relationships)
 def build_coactivation_graph(co_act: dict):
@@ -527,7 +533,7 @@ def load_state(state_file: Path) -> dict:
     """Load attention state from file."""
     if state_file.exists():
         try:
-            return json.loads(state_file.read_text())
+            return json.loads(state_file.read_text(encoding='utf-8'))
         except json.JSONDecodeError:
             pass
 
@@ -541,10 +547,13 @@ def load_state(state_file: Path) -> dict:
 
 
 def save_state(state_file: Path, state: dict) -> None:
-    """Save attention state to file."""
+    """Save attention state to file (atomic write to prevent corruption)."""
     state["last_update"] = datetime.now().isoformat()
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state, indent=2))
+    # H2: Atomic write - write to temp file then rename
+    temp_file = state_file.with_suffix('.tmp')
+    temp_file.write_text(json.dumps(state, indent=2), encoding='utf-8')
+    temp_file.replace(state_file)
 
 
 # ============================================================================
@@ -677,10 +686,11 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
             pass
 
     # Phase 5.5: Predictive pre-warming (boost predicted files if currently COLD)
-    if PREDICTOR_AVAILABLE and _predictor:
+    predictor = get_predictor() if PREDICTOR_AVAILABLE else None
+    if predictor:
         try:
             active_files = [p for p, s in state["scores"].items() if s >= WARM_THRESHOLD]
-            predictions = _predictor.predict(active_files, top_k=PREDICTIVE_PREWARM_TOP_K)
+            predictions = predictor.predict(active_files, top_k=PREDICTIVE_PREWARM_TOP_K)
             for path, prob in predictions:
                 if path in state["scores"]:
                     current = state["scores"][path]
@@ -773,7 +783,7 @@ def extract_warm_header(file_path: str, docs_root: Path, use_compression: bool =
         return None
 
     try:
-        content = full_path.read_text()
+        content = full_path.read_text(encoding='utf-8')
 
         if use_compression:
             return compress_warm(content)
@@ -798,7 +808,7 @@ def get_full_content(file_path: str, docs_root: Path) -> str | None:
         return None
 
     try:
-        return full_path.read_text()
+        return full_path.read_text(encoding='utf-8')
     except Exception as e:
         return f"[Error reading {file_path}: {e}]"
 
@@ -1063,12 +1073,15 @@ def load_telemetry_overrides():
                     proj = load_project_overrides()
                     params = proj.get("overrides", {})
                 else:
-                    data = json.loads(overrides_file.read_text())
+                    data = json.loads(overrides_file.read_text(encoding='utf-8'))
                     params = data.get("overrides", {})
                 # Update cache
                 _OVERRIDES_CACHE["params"] = params
                 _OVERRIDES_CACHE["mtime"] = current_mtime
                 _OVERRIDES_CACHE["path"] = str(overrides_file)
+                # H4: Only log on cache miss (when we actually load new values)
+                if params:
+                    print(f"[attnroute] Loaded overrides: HOT={params.get('MAX_HOT_FILES', 'default')} WARM={params.get('MAX_WARM_FILES', 'default')} CHARS={params.get('MAX_TOTAL_CHARS', 'default')}", file=sys.stderr)
         else:
             return
     except Exception:
@@ -1084,7 +1097,6 @@ def load_telemetry_overrides():
         COACTIVATION_BOOST = float(params["COACTIVATION_BOOST"])
     if "DECAY_RATES.default" in params:
         DECAY_RATES["default"] = float(params["DECAY_RATES.default"])
-    print(f"[attnroute] Loaded overrides: HOT={MAX_HOT_FILES} WARM={MAX_WARM_FILES} CHARS={MAX_TOTAL_CHARS}", file=sys.stderr)
 
 
 def measure_claude_md() -> int:
@@ -1157,7 +1169,7 @@ def record_turn_telemetry(prompt: str, was_notification: bool, stats: dict,
         record = {
             "turn_id": os.urandom(6).hex(),
             "timestamp": datetime.now().isoformat(),
-            "project": str(Path.cwd()).lower(),
+            "project": get_project() if TELEMETRY_LIB_AVAILABLE else str(Path.cwd()).lower().replace("\\", "/"),
             "session_id": get_session_id() if TELEMETRY_LIB_AVAILABLE else "unknown",
             "prompt_length": len(prompt),
             "was_notification": was_notification,
@@ -1187,13 +1199,16 @@ def main():
     Main entry point for Claude Code hook.
     Reads JSON from stdin, outputs tiered context to stdout.
     """
-    # Parse input
+    global MAX_HOT_FILES, MAX_WARM_FILES, MAX_TOTAL_CHARS  # C1: Allow modification in notification clamping
+
+    # Parse input - C3: Buffer stdin before parsing to allow fallback
+    raw_input = sys.stdin.read() if sys.stdin else ""
     try:
-        input_data = json.loads(sys.stdin.read())
+        input_data = json.loads(raw_input)
         prompt = input_data.get("prompt", "")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         # Fallback: treat entire stdin as prompt
-        prompt = sys.stdin.read() if sys.stdin else ""
+        prompt = raw_input
 
     if not prompt.strip():
         return

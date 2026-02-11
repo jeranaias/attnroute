@@ -17,17 +17,16 @@ Availability depends on optional dependencies:
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 # Check for required dependencies
 try:
-    import networkx as nx
+    import networkx as nx  # noqa: F401
     NETWORKX_AVAILABLE = True
 except ImportError:
     NETWORKX_AVAILABLE = False
 
 try:
-    from tree_sitter_languages import get_parser
+    from tree_sitter_languages import get_parser  # noqa: F401
     TREE_SITTER_AVAILABLE = True
 except ImportError:
     TREE_SITTER_AVAILABLE = False

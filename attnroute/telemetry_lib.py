@@ -12,7 +12,6 @@ import os
 import subprocess
 import sys
 import uuid
-from datetime import datetime
 from pathlib import Path
 
 # ============================================================================

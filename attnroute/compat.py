@@ -5,7 +5,8 @@ Centralizes the dual import pattern used throughout the codebase.
 Supports both package imports (pip installed) and standalone imports (development).
 """
 
-from typing import Any, Callable, Optional, Tuple, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 T = TypeVar('T')
 
@@ -14,7 +15,7 @@ def try_import(
     package_path: str,
     standalone_path: str,
     names: list[str],
-) -> Tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], bool]:
     """
     Try importing from package first, then standalone.
 
@@ -56,7 +57,7 @@ def try_import_class(
     package_path: str,
     standalone_path: str,
     class_name: str,
-) -> Tuple[Optional[type], bool]:
+) -> tuple[type | None, bool]:
     """
     Try importing a single class from package or standalone.
 
@@ -90,10 +91,10 @@ class LazyLoader:
 
     def __init__(self, factory: Callable[[], T]):
         self._factory = factory
-        self._instance: Optional[T] = None
+        self._instance: T | None = None
         self._initialized = False
 
-    def get(self) -> Optional[T]:
+    def get(self) -> T | None:
         """Get the lazily-loaded instance."""
         if not self._initialized:
             try:

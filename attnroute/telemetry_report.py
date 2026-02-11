@@ -22,8 +22,6 @@ except ImportError:
 try:
     from attnroute.telemetry_lib import (
         OPTIMIZATION_LOG_FILE,
-        TURNS_FILE,
-        estimate_tokens_from_chars,
         load_router_overrides,
         load_stats_cache,
         load_turns,
@@ -35,8 +33,6 @@ except ImportError:
         sys.path.insert(0, str(Path(__file__).parent))
         from telemetry_lib import (
             OPTIMIZATION_LOG_FILE,
-            TURNS_FILE,
-            estimate_tokens_from_chars,
             load_router_overrides,
             load_stats_cache,
             load_turns,

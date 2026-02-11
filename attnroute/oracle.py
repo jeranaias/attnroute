@@ -14,12 +14,10 @@ CLI: attnroute-oracle
 
 import json
 import math
-import re
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 try:
     from attnroute.telemetry_lib import (

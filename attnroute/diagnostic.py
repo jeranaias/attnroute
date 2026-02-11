@@ -17,7 +17,6 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 try:
     from attnroute import __version__
@@ -184,7 +183,7 @@ def get_config_info() -> dict:
         if turns_file.exists():
             try:
                 content = turns_file.read_text(encoding="utf-8").strip()
-                lines = [l for l in content.split("\n") if l] if content else []
+                lines = [ln for ln in content.split("\n") if ln] if content else []
                 config["num_turns_recorded"] = len(lines)
             except Exception:
                 pass

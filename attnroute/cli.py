@@ -27,7 +27,6 @@ def cmd_init(args):
 
 def cmd_status(args):
     """Show current status and configuration."""
-    from attnroute.session_init import main as session_main
 
     print("attnroute Status")
     print("=" * 50)
@@ -59,7 +58,7 @@ def cmd_status(args):
         pass
 
     try:
-        from attnroute.learner import Learner
+        from attnroute.learner import Learner  # noqa: F401
         features.append("Learning engine")
     except ImportError:
         pass
@@ -82,7 +81,7 @@ def cmd_status(args):
         print(f"Keywords: {keywords_found}")
         import json
         try:
-            data = json.loads(keywords_found.read_text())
+            data = json.loads(keywords_found.read_text(encoding='utf-8'))
             num_files = len(data.get("keywords", {}))
             num_pinned = len(data.get("pinned", []))
             print(f"  Files: {num_files}, Pinned: {num_pinned}")
@@ -97,7 +96,7 @@ def cmd_status(args):
         turns_file = telemetry_dir / "turns.jsonl"
         if turns_file.exists():
             content = turns_file.read_text(encoding="utf-8", errors="replace").strip()
-            lines = [l for l in content.split("\n") if l] if content else []
+            lines = [line for line in content.split("\n") if line] if content else []
             print(f"Telemetry: {len(lines)} turns recorded")
         else:
             print("Telemetry: No turns recorded yet")
@@ -350,7 +349,7 @@ For more information, visit: https://github.com/jeranaias/attnroute
                              help="Install globally instead of project-local")
 
     # status command
-    status_parser = subparsers.add_parser("status", help="Show current status and configuration")
+    subparsers.add_parser("status", help="Show current status and configuration")
 
     # report command
     report_parser = subparsers.add_parser("report", help="Show efficiency report")
@@ -381,7 +380,7 @@ For more information, visit: https://github.com/jeranaias/attnroute
     history_parser.add_argument("--last", type=int, default=20, help="Number of entries to show")
 
     # version command
-    version_parser = subparsers.add_parser("version", help="Show version information")
+    subparsers.add_parser("version", help="Show version information")
 
     # diagnostic command
     diag_parser = subparsers.add_parser("diagnostic", help="Generate diagnostic report for bug reports")

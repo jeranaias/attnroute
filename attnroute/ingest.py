@@ -18,16 +18,28 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-# Reuse normalize_path from predictor
-from attnroute.predictor import normalize_path
+# Reuse normalize_path from predictor (dual import for dev/installed mode)
+try:
+    from attnroute.predictor import normalize_path
+except ImportError:
+    try:
+        from predictor import normalize_path
+    except ImportError:
+        # Inline fallback if predictor not available
+        import sys
+        def normalize_path(p: str) -> str:
+            """Normalize path for consistent comparison."""
+            normalized = p.replace("\\", "/")
+            if sys.platform == "win32":
+                normalized = normalized.lower()
+            return normalized
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 INGEST_WEIGHT_SCALE = 0.5  # Ingested associations weighted at 50% of live-observed
 
 
-def extract_prompt_text(entry: dict) -> Optional[str]:
+def extract_prompt_text(entry: dict) -> str | None:
     """Extract text from a user message entry (handles string and list formats)."""
     message = entry.get("message", {})
     content = message.get("content", "")
@@ -74,7 +86,7 @@ def extract_keywords(text: str) -> list[str]:
 
 
 def ingest_transcripts(
-    project_filter: Optional[str] = None,
+    project_filter: str | None = None,
     max_sessions: int = 200,
 ) -> dict:
     """

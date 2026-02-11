@@ -28,11 +28,9 @@ import queue
 import sqlite3
 import sys
 import threading
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 from attnroute.compat import try_import
 
@@ -66,7 +64,7 @@ except ImportError:
 # Future enhancement: Add semantic vector search alongside FTS5
 try:
     import chromadb
-    from chromadb.config import Settings
+    from chromadb.config import Settings  # noqa: F401
     CHROMA_AVAILABLE = True
 except ImportError:
     chromadb = None
@@ -765,7 +763,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
 
     # Stats command
-    stats_parser = subparsers.add_parser("stats", help="Show storage statistics")
+    subparsers.add_parser("stats", help="Show storage statistics")
 
     # Search command
     search_parser = subparsers.add_parser("search", help="Search observations")

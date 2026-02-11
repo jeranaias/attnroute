@@ -28,7 +28,6 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 MODEL_CACHE_FILE = Path.home() / ".claude" / "telemetry" / "predictor_model.pkl"

@@ -22,13 +22,10 @@ The learner runs automatically:
 """
 
 import json
-import math
 import re
-import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set
 
 from attnroute.compat import try_import
 
@@ -662,7 +659,6 @@ class Learner:
         accessed_files = set()
 
         for tool_call in tool_calls:
-            tool = tool_call.get('tool', '')
             target = tool_call.get('target', '')
             pattern = tool_call.get('pattern', '')
 

@@ -2,7 +2,6 @@
 import json
 from abc import ABC
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 
 class AttnroutePlugin(ABC):

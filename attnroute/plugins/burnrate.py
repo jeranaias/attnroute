@@ -8,9 +8,8 @@ Tracks token usage patterns and predicts when you'll hit your limit,
 giving early warnings to pace your work.
 """
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from attnroute.plugins.base import AttnroutePlugin
 

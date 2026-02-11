@@ -15,7 +15,6 @@ Usage: attnroute init
 """
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -367,7 +366,7 @@ def main():
 
     if installed < total:
         print("\n  To install all dependencies:")
-        print("    pip install bm25s model2vec numpy tree-sitter tree-sitter-language-pack")
+        print("    pip install bm25s model2vec numpy tree-sitter-languages")
     print()
 
     # Ensure telemetry directory

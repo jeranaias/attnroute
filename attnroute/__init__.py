@@ -17,26 +17,44 @@ Quick start:
     attnroute status
 """
 
-__version__ = "0.5.5"
+__version__ = "0.5.6"
 __author__ = "jeranaias"
+__all__ = [
+    "__version__",
+    "__author__",
+    "build_context_output",
+    "get_tier",
+    "update_attention",
+    "RepoMapper",
+    "ObservationCompressor",
+    "ProgressiveRetriever",
+    "Learner",
+]
 
-# Core exports
+# Core exports (noqa comments suppress F401 for intentional re-exports)
 try:
-    from attnroute.context_router import build_context_output, get_tier, update_attention
+    from attnroute.context_router import (  # noqa: F401
+        build_context_output,
+        get_tier,
+        update_attention,
+    )
 except ImportError:
     pass
 
 try:
-    from attnroute.repo_map import RepoMapper
+    from attnroute.repo_map import RepoMapper  # noqa: F401
 except ImportError:
     pass
 
 try:
-    from attnroute.compressor import ObservationCompressor, ProgressiveRetriever
+    from attnroute.compressor import (  # noqa: F401
+        ObservationCompressor,
+        ProgressiveRetriever,
+    )
 except ImportError:
     pass
 
 try:
-    from attnroute.learner import Learner
+    from attnroute.learner import Learner  # noqa: F401
 except ImportError:
     pass
