@@ -5,6 +5,15 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.9] - 2026-02-11
+
+### Fixed
+- `attnroute init` now shows helpful diagnostics when "No projects found"
+  - Shows the CWD that was checked
+  - Warns if `.claude` exists but is a file instead of directory
+  - Detects case-sensitivity mismatches (e.g., `.Claude` vs `.claude`)
+  - Tells user how to create `.claude/` directory
+
 ## [0.5.8] - 2026-02-11
 
 ### Fixed
@@ -171,6 +180,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `attnroute init` and `attnroute status` commands
 - Zero required dependencies
 
+[0.5.9]: https://github.com/jeranaias/attnroute/compare/v0.5.8...v0.5.9
 [0.5.8]: https://github.com/jeranaias/attnroute/compare/v0.5.7...v0.5.8
 [0.5.7]: https://github.com/jeranaias/attnroute/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/jeranaias/attnroute/compare/v0.5.5...v0.5.6

@@ -261,25 +261,38 @@ def scan_projects() -> list:
     projects = []
     seen = set()
 
-    def add_if_project(path: Path):
+    def add_if_project(path: Path, is_cwd: bool = False):
         """Check if path has .claude/ and add to results."""
         try:
             resolved = str(path.resolve())
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
+            if is_cwd:
+                print(f"  WARN: Could not resolve CWD: {e}")
             return
         if resolved in seen:
             return
         claude_dir = path / ".claude"
-        if claude_dir.is_dir():
-            seen.add(resolved)
-            projects.append({
-                "path": resolved,
-                "has_keywords": (claude_dir / "keywords.json").exists(),
-                "has_md": any(claude_dir.glob("**/*.md")),
-            })
+
+        # Check if .claude exists at all
+        if claude_dir.exists():
+            if claude_dir.is_dir():
+                seen.add(resolved)
+                projects.append({
+                    "path": resolved,
+                    "has_keywords": (claude_dir / "keywords.json").exists(),
+                    "has_md": any(claude_dir.glob("**/*.md")),
+                })
+            elif is_cwd:
+                # .claude exists but is a file, not directory - warn user
+                print(f"  WARN: {claude_dir} exists but is a file, not a directory")
+        elif is_cwd:
+            # For CWD, check if there's a case-sensitivity issue
+            parent_contents = [p.name for p in path.iterdir() if p.name.lower() == ".claude"]
+            if parent_contents:
+                print(f"  WARN: Found '{parent_contents[0]}' but expected '.claude' (case mismatch?)")
 
     # 1. Always check CWD first
-    add_if_project(Path.cwd())
+    add_if_project(Path.cwd(), is_cwd=True)
 
     # 2. Check immediate children of home (original behavior)
     home = Path.home()
@@ -513,7 +526,15 @@ def main():
             print(f"\n  Generated {templates_written} keywords.json.template file{'s' if templates_written != 1 else ''}")
             print("  Rename to keywords.json and customize to activate routing.")
     else:
-        print("\n  No projects with .claude/ directories found.")
+        cwd = Path.cwd()
+        print(f"\n  No projects with .claude/ directories found.")
+        print(f"  Checked: {cwd}")
+        if (cwd / ".claude").exists():
+            if not (cwd / ".claude").is_dir():
+                print(f"  Note: {cwd / '.claude'} exists but is a file, not a directory")
+        else:
+            print(f"  Note: {cwd / '.claude'} does not exist")
+        print(f"  Create .claude/ directory with .md files to enable routing.")
 
     print()
     print("─" * 56)
