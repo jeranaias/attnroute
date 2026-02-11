@@ -497,13 +497,15 @@ def main():
     # Try to build search index if deps available
     maybe_build_search_index()
 
-    # Scan projects
+    # Scan projects for optional keywords.json template generation
+    # Note: This is ONLY for doc routing (.claude/*.md files)
+    # Source code routing works automatically without any .claude/ directory
     projects = scan_projects()
     if projects:
         needs_keywords = [p for p in projects if p["has_md"] and not p["has_keywords"]]
         has_keywords = [p for p in projects if p["has_keywords"]]
 
-        print(f"\n  Projects ({len(projects)} found):")
+        print(f"\n  Doc routing projects ({len(projects)} found):")
         for p in has_keywords:
             name = Path(p["path"]).name
             print(f"    + {name:<24} keywords.json")
@@ -524,21 +526,15 @@ def main():
 
         if templates_written:
             print(f"\n  Generated {templates_written} keywords.json.template file{'s' if templates_written != 1 else ''}")
-            print("  Rename to keywords.json and customize to activate routing.")
+            print("  Rename to keywords.json and customize to activate doc routing.")
     else:
-        cwd = Path.cwd()
-        print(f"\n  No projects with .claude/ directories found.")
-        print(f"  Checked: {cwd}")
-        if (cwd / ".claude").exists():
-            if not (cwd / ".claude").is_dir():
-                print(f"  Note: {cwd / '.claude'} exists but is a file, not a directory")
-        else:
-            print(f"  Note: {cwd / '.claude'} does not exist")
-        print(f"  Create .claude/ directory with .md files to enable routing.")
+        # No .claude/ directories found - that's fine, source routing still works
+        print("\n  No .claude/ directories found (optional for doc routing)")
 
     print()
     print("─" * 56)
-    print("  Ready. Hooks activate on next Claude Code session.")
+    print("  Ready. Source code routing is active.")
+    print("  Hooks activate on next Claude Code session.")
     print()
 
     # Quick reference
