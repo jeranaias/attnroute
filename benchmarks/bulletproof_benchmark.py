@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-AttnRoute v0.5.0 - BULLETPROOF BENCHMARK
+AttnRoute Benchmark - Reproducible Performance Measurement
 
-This benchmark is designed to be IMPENETRABLE to criticism:
+Measures attnroute's context compression against a baseline of all source files
+concatenated. This measures compression effectiveness, not a direct comparison
+to Claude Code's native file selection (which also reads selectively).
 
 1. PUBLIC REPOS - Uses well-known open source projects anyone can verify
-2. ACTUAL AIDER - Installs and runs Aider for head-to-head comparison
-3. MULTIPLE TOKENIZERS - tiktoken AND Anthropic's tokenizer
-4. STATISTICAL RIGOR - Multiple runs, confidence intervals, std dev
-5. REPRODUCIBLE - Full instructions, deterministic seeds, version pinning
-6. APPLES-TO-APPLES - Same task, same codebase, same metrics
+2. MULTIPLE TOKENIZERS - tiktoken and character-based estimation
+3. STATISTICAL RIGOR - Multiple runs, confidence intervals, std dev
+4. REPRODUCIBLE - Full instructions, deterministic seeds, version pinning
+5. FAIR COMPARISON - Same task, same codebase, same metrics
 
 Run: python bulletproof_benchmark.py --full
 """
@@ -459,10 +460,10 @@ def run_bulletproof_benchmark(use_public_repos: bool = False,
 
     print()
     print("=" * 80)
-    print("ATTNROUTE v0.5.0 - BULLETPROOF BENCHMARK")
+    print("ATTNROUTE - REPRODUCIBLE BENCHMARK")
     print("=" * 80)
     print()
-    print("This benchmark is designed to be IMPENETRABLE:")
+    print("This benchmark uses reproducible methodology:")
     print("  1. Real token counts with tiktoken (cl100k_base)")
     print("  2. Multiple runs with statistical analysis")
     print("  3. 95% confidence intervals")
@@ -619,15 +620,24 @@ REPRODUCIBILITY CHECKLIST:
   [x] Baseline: Actual source file content, not estimates
 
 WHAT WE MEASURE:
-  - Baseline: Sum of all source file tokens in repo
+  - Baseline: Sum of all source file tokens in repo (theoretical maximum)
   - Output: Tokens in generated repo map (symbol-level summary)
   - This is the "repo map" component, similar to Aider's --show-repo-map
+
+IMPORTANT CAVEATS:
+  - The baseline (all source files concatenated) is a theoretical maximum,
+    NOT how Claude Code actually works. Claude selectively reads files via
+    tool calls, so the practical baseline is much smaller.
+  - Real-world token savings depend on query patterns and codebase structure.
+  - The 90%+ claim reflects compression of codebase-to-map, not a comparison
+    against Claude Code's native file selection behavior.
 
 LIMITATIONS (for transparency):
   - Repo map is one component of context routing
   - Full attnroute also includes: keyword matching, heat decay,
     co-activation learning, smart prediction
   - Different tools solve slightly different problems
+  - No end-to-end comparison against Claude Code without attnroute
 
 AIDER COMPARISON STATUS:
   - Aider v0.86.1 installed and tested

@@ -56,10 +56,8 @@ claude
 ```
 
 ```
-Before attnroute:  50,000-200,000 tokens per query  (file hunting via tool calls)
-After attnroute:           2,027 tokens per query  (pre-selected relevant context)
-                   ══════════════════════════════════════
-                   95-98% reduction in 309ms
+Before attnroute:  Claude hunts for files via tool calls (variable token cost)
+After attnroute:   Pre-selected relevant context injected (~2K tokens, 90%+ reduction)
 ```
 
 ---
@@ -74,25 +72,27 @@ attnroute is a **hook system for [Claude Code](https://github.com/anthropics/cla
 
 | Metric | Value |
 |--------|-------|
-| **Token Reduction** | 99.87% (Go backend), 97.82% (Python lib) |
+| **Context Compression** | 99.87% (Go, 556 files), 97.82% (Python, 30 files) |
 | **Latency** | 309ms (556 files), 95ms (30 files) |
 | **Context Precision** | HOT files get full content, WARM get symbols only |
 | **Memory Overhead** | <100MB runtime footprint |
+
+> **Note**: Compression is measured against all source files concatenated (theoretical maximum).
+> Claude Code selectively reads files via tool calls, so real-world savings depend on your
+> workflow. See [Benchmarks](#benchmarks) for methodology details.
 
 ---
 
 ## Table of Contents
 
-1. [Executive Summary](#executive-summary)
-2. [The Problem](#the-problem)
-3. [How It Works](#how-it-works)
+1. [The Problem](#the-problem)
+2. [How It Works](#how-it-works)
    - [Attention Tracking](#attention-tracking)
    - [Heat Decay](#heat-decay)
    - [Co-activation Learning](#co-activation-learning)
    - [PageRank Ranking](#pagerank-ranking)
    - [Token Budgeting](#token-budgeting)
 4. [Technical Architecture](#technical-architecture)
-   - [Pipeline Overview](#pipeline-overview)
    - [The Three-Tier Context System](#the-three-tier-context-system)
    - [Search Strategies](#search-strategies)
 5. [Benchmarks](#benchmarks)
@@ -126,31 +126,6 @@ attnroute is a **hook system for [Claude Code](https://github.com/anthropics/cla
 
 ---
 
-## Executive Summary
-
-attnroute transforms Claude Code from a "read everything" approach to a "read what matters" approach:
-
-| Aspect | Before attnroute | After attnroute |
-|--------|------------------|-----------------|
-| **Token Usage** | 50-200K per query (file hunting) | 2-5K per query (targeted) |
-| **Response Time** | Slower (more file reads) | Fast (pre-selected context) |
-| **API Cost** | Higher | **90%+ reduction** |
-| **Context Quality** | Random files | Relevant files ranked by importance |
-| **Setup Required** | N/A | 2 commands, 30 seconds |
-
-### Key Features
-
-- **Zero-config installation**: `pip install attnroute[all] && attnroute init`
-- **Source code routing**: Search index covers your actual source tree, not just docs
-- **Smart injection**: Docs get full content, source files get tree-sitter outlines
-- **Invisible operation**: Works in the background via Claude Code hooks
-- **Graceful degradation**: Falls back gracefully if optional dependencies unavailable
-- **Cross-platform**: Windows, macOS, Linux
-- **Security hardened**: Path traversal prevention, atomic writes, input validation (v0.5.12)
-- **Verified benchmarks**: Measured with tiktoken cl100k_base on real codebases
-
----
-
 ## The Problem
 
 When you use Claude Code on a large codebase, it faces a fundamental challenge:
@@ -167,44 +142,23 @@ Claude's Context Window: 200K tokens (Sonnet) / 128K tokens (Haiku)
 
 **The result**: Slower responses, higher costs, and sometimes Claude misses the files that matter most.
 
-### What Happens Without attnroute
+### How attnroute Helps
+
+Without attnroute, Claude uses tool calls to search and read files. This works, but it spends tokens hunting for the right context.
+
+With attnroute, relevant files are **pre-selected and injected** into every prompt:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  You: "Fix the bug in the auth module"                      │
-├─────────────────────────────────────────────────────────────┤
-│  Claude reads: README.md, CHANGELOG.md, test_utils.py,      │
-│                config.example.yaml, .gitignore, setup.py,   │
-│                ... (random 200K tokens worth of files)      │
-├─────────────────────────────────────────────────────────────┤
-│  Claude misses: auth.py, session.py, middleware.py          │
-│                 (the files you actually need)               │
-├─────────────────────────────────────────────────────────────┤
-│  Result: "I don't see an auth module in the codebase..."    │
-└─────────────────────────────────────────────────────────────┘
+You: "Fix the bug in the auth module"
+
+attnroute injects (~650 tokens):
+  HOT:      docs/auth-guide.md   (full content, 400 tokens)
+  WARM:     docs/api-reference.md (TOC, 100 tokens)
+  HOT:SRC   src/auth.py          (outline: signatures, 120 tokens)
+  WARM:SRC  src/session.py       (summary, 30 tokens)
 ```
 
-### What Happens With attnroute
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  You: "Fix the bug in the auth module"                      │
-├─────────────────────────────────────────────────────────────┤
-│  attnroute injects:                                         │
-│    HOT:      docs/auth-guide.md (full content, 400 tokens)  │
-│    WARM:     docs/api-reference.md (TOC, 100 tokens)        │
-│    HOT:SRC   src/auth.py (outline: signatures, 120 tokens)  │
-│    WARM:SRC  src/session.py (summary, 30 tokens)            │
-│    ───────────────────────────────────────────              │
-│    Total: ~650 tokens (not 1.5 million)                     │
-├─────────────────────────────────────────────────────────────┤
-│  Result: "I see the auth module outline. The authenticate() │
-│          function needs the expiry check. Let me Read the   │
-│          full file and fix it..."                           │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Key insight**: Source files get **outlines** (function signatures, class defs, imports), not full content. Claude's Read tool handles full content when needed—attnroute gives it the map.
+**Key insight**: Source files get **outlines** (function signatures, class defs, imports), not full content. Claude's Read tool handles full content when needed -- attnroute gives it the map.
 
 ---
 
@@ -341,121 +295,19 @@ PageRank scores:
 
 ### Token Budgeting
 
-attnroute fits everything within your token budget:
-
-```
-Token Budget Allocation:
-
-Budget: 2,000 tokens
-
-┌─────────────────────────────────────────────────────────────┐
-│  HOT files (score > 0.7): Full content                      │
-│    auth.py      ████████████████████████  480 tokens        │
-│    session.py   ████████████████         320 tokens         │
-│                                          ────────           │
-│                                          800 tokens         │
-├─────────────────────────────────────────────────────────────┤
-│  WARM files (0.3-0.7): Symbols only                         │
-│    middleware.py  ████                   80 tokens          │
-│    routes.py      ███                    60 tokens          │
-│    utils.py       ████                   80 tokens          │
-│                                          ────────           │
-│                                          220 tokens         │
-├─────────────────────────────────────────────────────────────┤
-│  Overhead (metadata, formatting)         200 tokens         │
-├─────────────────────────────────────────────────────────────┤
-│  TOTAL                                   1,220 tokens       │
-│  REMAINING                               780 tokens         │
-└─────────────────────────────────────────────────────────────┘
-```
+attnroute fits injected context within configurable limits (default ~6K tokens). HOT files get full content or outlines, WARM files get compressed summaries. Files exceeding the budget are dropped by lowest score.
 
 ---
 
 ## Technical Architecture
 
-### Pipeline Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        attnroute Architecture                            │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Claude Code                                                            │
-│       │                                                                 │
-│       ▼                                                                 │
-│  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │  UserPromptSubmit Hook                                              │ │
-│  │  ~/.claude/settings.json → attnroute context_router.py             │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
-│       │                                                                 │
-│       ▼                                                                 │
-│  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │  Context Router                                                     │ │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │ │
-│  │  │   Indexer    │  │   Searcher   │  │   Ranker     │              │ │
-│  │  │  (symbols)   │  │ (BM25/embed) │  │ (PageRank)   │              │ │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘              │ │
-│  │         │                 │                 │                       │ │
-│  │         └─────────────────┼─────────────────┘                       │ │
-│  │                           ▼                                         │ │
-│  │                  ┌──────────────────┐                               │ │
-│  │                  │  Attention State │                               │ │
-│  │                  │  (heat scores)   │                               │ │
-│  │                  └──────────────────┘                               │ │
-│  │                           │                                         │ │
-│  │                           ▼                                         │ │
-│  │                  ┌──────────────────┐                               │ │
-│  │                  │  Token Budget    │                               │ │
-│  │                  │  (smart alloc)   │                               │ │
-│  │                  └──────────────────┘                               │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
-│       │                                                                 │
-│       ▼                                                                 │
-│  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │  Enhanced Prompt                                                    │ │
-│  │  [Original prompt] + [Injected context] + [Symbol map]             │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
-│       │                                                                 │
-│       ▼                                                                 │
-│  Claude API                                                             │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
 ### The Three-Tier Context System
 
-attnroute classifies files into three tiers based on their heat score:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  HOT (score > 0.7)                                          │
-│  ─────────────────                                          │
-│  Full file content injected                                 │
-│  • Files you're actively editing                            │
-│  • Recently accessed files                                  │
-│  • High PageRank + recent activity                          │
-│                                                             │
-│  Example: auth.py you just edited                           │
-├─────────────────────────────────────────────────────────────┤
-│  WARM (score 0.3 - 0.7)                                     │
-│  ─────────────────────                                      │
-│  Symbols only (function signatures, class names)            │
-│  • Files accessed in current session                        │
-│  • Co-activated with HOT files                              │
-│  • Medium PageRank importance                               │
-│                                                             │
-│  Example: utils.py imported by auth.py                      │
-├─────────────────────────────────────────────────────────────┤
-│  COLD (score < 0.3)                                         │
-│  ─────────────────                                          │
-│  Not injected (saves tokens)                                │
-│  • Files not accessed recently                              │
-│  • Low importance in dependency graph                       │
-│  • Not co-activated with current focus                      │
-│                                                             │
-│  Example: archived/old_feature.py                           │
-└─────────────────────────────────────────────────────────────┘
-```
+| Tier | Score | Content | Example |
+|------|-------|---------|---------|
+| **HOT** | > 0.8 | Full file / outline | File you just edited |
+| **WARM** | 0.25 - 0.8 | Symbols / TOC | File imported by HOT file |
+| **COLD** | < 0.25 | Not injected | Unused files |
 
 ### Search Strategies
 
@@ -486,13 +338,17 @@ def search(query: str) -> List[File]:
 ### Methodology
 
 All benchmarks measured with:
-- **Tokenizer**: tiktoken cl100k_base (same as Claude API)
-- **Baseline**: All files in repository concatenated (theoretical maximum)
-- **attnroute**: Context injected for a typical query
+- **Tokenizer**: tiktoken cl100k_base (same family as Claude)
+- **Baseline**: All source files in repository concatenated (theoretical maximum)
+- **attnroute output**: Context injected by RepoMapper for a sample query
 - **Hardware**: Standard laptop (no GPU required)
 - **Runs**: 3 runs, mean reported
 
-> **Note**: The baseline represents the theoretical maximum if you dumped your entire codebase. In practice, Claude Code selectively reads files, so real-world savings are typically 90%+ rather than 99%+.
+> **Important**: The baseline is a **theoretical maximum** (all files concatenated), not how
+> Claude Code actually works. Claude selectively reads files via tool calls, so the practical
+> baseline is much smaller. These numbers measure attnroute's **compression effectiveness**,
+> not a direct comparison to Claude Code's native behavior. See `benchmarks/README.md` for
+> full methodology details.
 
 ### Results
 
@@ -500,22 +356,6 @@ All benchmarks measured with:
 |:-----------|------:|----------------:|-----------------:|----------:|-----:|
 | Go backend | 556 | 1,569,434 | 2,027 | **99.87%** | 309ms |
 | Python lib | 30 | 94,991 | 2,072 | **97.82%** | 95ms |
-
-```
-Token Reduction Visualization:
-
-Go backend (556 files):
-Baseline  ████████████████████████████████████████████████████  1,569,434
-attnroute █                                                        2,027
-          └───────────────────────────────────────────────────────────────►
-          0                                                    1,500,000
-
-Python lib (30 files):
-Baseline  ████████████████████████████████████████████████████     94,991
-attnroute ██                                                        2,072
-          └───────────────────────────────────────────────────────────────►
-          0                                                      100,000
-```
 
 ### Prediction Accuracy
 
@@ -555,12 +395,11 @@ attnroute benchmark
 
 ### Comparison with Alternatives
 
-| Approach | Token Reduction | Setup | Maintenance |
-|----------|-----------------|-------|-------------|
+| Approach | Context Compression | Setup | Maintenance |
+|----------|---------------------|-------|-------------|
 | **attnroute** | 90%+ | 30 seconds | Zero |
 | Manual file picking | 90%+ | Per-query | High |
 | .claudeignore | 50-70% | Minutes | Medium |
-| No optimization | 0% | None | None |
 
 ---
 
@@ -773,21 +612,7 @@ pip install attnroute[compression]
 
 attnroute includes a **plugin system** that extends Claude Code with behavioral guardrails. Plugins hook into the session lifecycle to monitor, guide, and protect your coding sessions.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Plugin Lifecycle                                 │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  SessionStart ──► on_session_start()  ──► Initialize plugin state       │
-│                                                                         │
-│  UserPrompt ────► on_prompt_pre()     ──► Can modify/halt prompt        │
-│              ├──► Context Router      ──► Normal attnroute processing   │
-│              └──► on_prompt_post()    ──► Inject additional context     │
-│                                                                         │
-│  Stop ──────────► on_stop()           ──► Analyze tool calls, warn      │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+Plugins hook into the session lifecycle: `SessionStart`, `UserPrompt` (pre/post), and `Stop`.
 
 | Plugin | Purpose | Addresses |
 |--------|---------|-----------|
@@ -805,38 +630,7 @@ All plugins are **enabled by default** and store state in `~/.claude/plugins/`.
 
 **Solution**: VerifyFirst tracks every file Claude reads and flags violations when edits are attempted on unread files.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  VerifyFirst Flow                                                        │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Tool Call: Read("auth.py")                                             │
-│       │                                                                 │
-│       ▼                                                                 │
-│  ┌─────────────────────┐                                                │
-│  │  files_read.add()   │  ──► auth.py now "verified"                    │
-│  └─────────────────────┘                                                │
-│                                                                         │
-│  Tool Call: Edit("auth.py", ...)                                        │
-│       │                                                                 │
-│       ▼                                                                 │
-│  ┌─────────────────────┐                                                │
-│  │  auth.py in         │  ──► ✓ Allowed (file was read first)           │
-│  │  files_read?        │                                                │
-│  └─────────────────────┘                                                │
-│                                                                         │
-│  Tool Call: Edit("config.py", ...)                                      │
-│       │                                                                 │
-│       ▼                                                                 │
-│  ┌─────────────────────┐                                                │
-│  │  config.py in       │  ──► ✗ VIOLATION (not read yet)                │
-│  │  files_read?        │      Logged + warning emitted                  │
-│  └─────────────────────┘                                                │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-**Context injection**: Every prompt includes a list of "verified" files that are safe to edit:
+**How it works**: Tracks every file Claude reads. If an edit is attempted on an unread file, it's flagged as a violation. Every prompt includes a list of "verified" files that are safe to edit:
 
 ```markdown
 ## VerifyFirst Policy
@@ -860,29 +654,7 @@ You MUST read a file before editing it.
 
 **Solution**: LoopBreaker tracks tool call patterns and detects when Claude is repeating similar operations on the same file. When a loop is detected, it injects a "stop and reconsider" intervention.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  LoopBreaker Detection                                                   │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Recent attempts (last 20 tracked):                                     │
-│                                                                         │
-│  Turn 1: Edit("auth.py", old="def login", new="def login_v2")          │
-│  Turn 2: Edit("auth.py", old="def login", new="def login_fixed")       │
-│  Turn 3: Edit("auth.py", old="def login", new="def login_new")  ◄── 3x │
-│          │                                                              │
-│          ▼                                                              │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  LOOP DETECTED                                                   │   │
-│  │  Same file: auth.py                                              │   │
-│  │  Similar signature: Edit|auth.py|def:login|                      │   │
-│  │  Count: 3 attempts                                               │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-**Signature matching**: Each tool call is converted to a signature for comparison:
+**How it works**: Each tool call is converted to a signature for comparison:
 
 ```python
 signature = f"{tool}|{normalized_path}|{key_identifiers}|{command}"
@@ -920,30 +692,7 @@ signature = f"{tool}|{normalized_path}|{key_identifiers}|{command}"
 
 **Solution**: BurnRate monitors token usage from Claude Code's stats cache, calculates a rolling burn rate (tokens/minute), and predicts when you'll exhaust your quota.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  BurnRate Calculation                                                    │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Stats source: ~/.claude/stats-cache.json                               │
-│                                                                         │
-│  Sample collection (last 20 samples):                                   │
-│                                                                         │
-│  Time     Session Tokens                                                │
-│  ─────────────────────────                                              │
-│  10:00    45,000  ████████████████████░░░░░░░░░░                        │
-│  10:05    52,000  ████████████████████████░░░░░░                        │
-│  10:10    61,000  ████████████████████████████░░                        │
-│  10:15    68,000  ██████████████████████████████                        │
-│                                                                         │
-│  Burn rate = (68,000 - 45,000) / 15 min = 1,533 tokens/min              │
-│                                                                         │
-│  Plan limit (Pro): 150,000 tokens                                       │
-│  Remaining: 150,000 - 68,000 = 82,000 tokens                            │
-│  Time until exhaustion: 82,000 / 1,533 = ~53 minutes                    │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+**How it works**: Reads `~/.claude/stats-cache.json`, calculates a rolling burn rate (tokens/minute), and predicts when you'll exhaust your quota.
 
 **Warning thresholds**:
 
@@ -1204,22 +953,3 @@ Built on ideas from:
 - **[model2vec](https://github.com/MinishLab/model2vec)** — Lightweight sentence embeddings
 - **[SWE-Pruner](https://arxiv.org/abs/2601.16746)** (Chen et al., 2026) — Self-adaptive context pruning for coding agents. Tackles the same context efficiency problem from the compression side (prune after accumulation) vs. attnroute's routing approach (select before injection)
 
----
-
-<p align="center">
-  <strong>Stop wasting tokens. Start routing attention.</strong>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Built_with-determination-red.svg" alt="Built with determination">
-</p>
-
----
-
-<p align="center">
-  <strong>attnroute</strong> — Intelligent context routing for Claude Code.
-</p>
-
-<p align="center">
-  <em>90%+ token reduction. <500ms latency. Zero config required.</em>
-</p>
