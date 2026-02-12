@@ -1,9 +1,12 @@
 """Base class for attnroute plugins."""
 import json
-import os
-import tempfile
 from abc import ABC
 from pathlib import Path
+
+try:
+    from attnroute.compat import safe_atomic_write, validate_plugin_name
+except ImportError:
+    from compat import safe_atomic_write, validate_plugin_name
 
 
 class AttnroutePlugin(ABC):
@@ -28,31 +31,27 @@ class AttnroutePlugin(ABC):
     _state_dir = Path.home() / ".claude" / "plugins"
 
     def __init__(self):
+        # Validate plugin name to prevent path traversal attacks
+        validate_plugin_name(self.name)
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._state_file = self._state_dir / f"{self.name}_state.json"
 
     def load_state(self) -> dict:
-        """Load plugin-specific state from disk."""
-        if self._state_file.exists():
-            try:
-                return json.loads(self._state_file.read_text(encoding="utf-8"))
-            except Exception:
-                return {}
-        return {}
+        """Load plugin-specific state from disk (TOCTOU-safe)."""
+        try:
+            data = json.loads(self._state_file.read_text(encoding="utf-8"))
+            # Type validation: ensure we get a dict
+            return data if isinstance(data, dict) else {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
 
     def save_state(self, state: dict) -> None:
-        """Save plugin-specific state to disk using atomic write."""
-        temp_fd, temp_path = tempfile.mkstemp(dir=self._state_dir, suffix='.tmp')
-        try:
-            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                json.dump(state, f, indent=2, default=str)
-            Path(temp_path).replace(self._state_file)  # Atomic rename
-        except Exception:
-            try:
-                os.unlink(temp_path)
-            except Exception:
-                pass
-            raise
+        """Save plugin-specific state to disk using atomic write with fallback."""
+        content = json.dumps(state, indent=2, default=str)
+        if not safe_atomic_write(self._state_file, content):
+            # Log failure but don't crash the plugin
+            import sys
+            print(f"[{self.name}] Warning: Failed to save state", file=sys.stderr)
 
     # Lifecycle hooks (override as needed)
 
@@ -115,12 +114,17 @@ class AttnroutePlugin(ABC):
         return None
 
     def is_enabled(self) -> bool:
-        """Check if this plugin is enabled in config."""
+        """Check if this plugin is enabled in config (TOCTOU-safe)."""
         config_file = Path.home() / ".claude" / "plugins" / "config.json"
-        if config_file.exists():
-            try:
-                config = json.loads(config_file.read_text(encoding="utf-8"))
-                return config.get("enabled", {}).get(self.name, True)
-            except Exception:
-                pass
+        try:
+            config = json.loads(config_file.read_text(encoding="utf-8"))
+            # Type validation: ensure we get a dict
+            if not isinstance(config, dict):
+                return True
+            enabled = config.get("enabled", {})
+            if not isinstance(enabled, dict):
+                return True
+            return enabled.get(self.name, True)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
         return True  # Enabled by default if config missing

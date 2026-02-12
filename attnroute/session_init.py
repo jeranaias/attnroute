@@ -8,6 +8,7 @@ bleed, and outputs a compact efficiency dashboard.
 Hook: SessionStart
 """
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -60,16 +61,21 @@ def detect_project_switch():
     if prev and prev != current:
         # Project switched — reset attention state to prevent cross-project bleed
         attn_file = ATTN_STATE_PROJECT
-        if attn_file.exists():
+        # Use try/except instead of exists() to avoid TOCTOU race
+        try:
+            attn = json.loads(attn_file.read_text(encoding='utf-8'))
+            for key in attn.get("scores", {}):
+                attn["scores"][key] = 0.0
+            attn["turn_count"] = 0
+            # Use atomic write if available
             try:
-                attn = json.loads(attn_file.read_text(encoding='utf-8'))
-                for key in attn.get("scores", {}):
-                    attn["scores"][key] = 0.0
-                attn["turn_count"] = 0
+                from attnroute.compat import safe_atomic_write
+                safe_atomic_write(attn_file, json.dumps(attn, indent=2))
+            except ImportError:
                 attn_file.write_text(json.dumps(attn, indent=2), encoding='utf-8')
-                print(f"[telemetry] Project switch: {prev} -> {current}, attention reset", file=sys.stderr)
-            except Exception:
-                pass
+            print(f"[telemetry] Project switch: {prev} -> {current}, attention reset", file=sys.stderr)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
 
     state["current_project"] = current
     state["session_start"] = datetime.now().isoformat()
@@ -80,10 +86,14 @@ def detect_project_switch():
         try:
             learner = Learner()
             warmup = learner.get_warmup_scores()
-            if warmup and ATTN_STATE_PROJECT.parent.exists():
+            if warmup:
                 attn_file = ATTN_STATE_PROJECT
                 try:
-                    attn = json.loads(attn_file.read_text(encoding='utf-8')) if attn_file.exists() else {"scores": {}, "consecutive_turns": {}, "turn_count": 0}
+                    # TOCTOU-safe: use try/except instead of exists()
+                    try:
+                        attn = json.loads(attn_file.read_text(encoding='utf-8'))
+                    except (FileNotFoundError, json.JSONDecodeError, OSError):
+                        attn = {"scores": {}, "consecutive_turns": {}, "turn_count": 0}
                     applied = 0
                     for f, warmup_score in warmup.items():
                         if f in attn.get("scores", {}):
@@ -92,7 +102,12 @@ def detect_project_switch():
                                 attn["scores"][f] = warmup_score
                                 applied += 1
                     if applied:
-                        attn_file.write_text(json.dumps(attn, indent=2), encoding='utf-8')
+                        # Use atomic write if available
+                        try:
+                            from attnroute.compat import safe_atomic_write
+                            safe_atomic_write(attn_file, json.dumps(attn, indent=2))
+                        except ImportError:
+                            attn_file.write_text(json.dumps(attn, indent=2), encoding='utf-8')
                         print(f"[attnroute] Session warm-start: {applied} files pre-warmed from previous session", file=sys.stderr)
                 except Exception:
                     pass
@@ -215,8 +230,8 @@ def main():
                 output = plugin.on_session_start(session_state)
                 if output:
                     print(output)
-            except Exception:
-                pass  # Never fail the hook due to plugins
+            except Exception as e:
+                print(f"[attnroute] Plugin {getattr(plugin, 'name', 'unknown')}.on_session_start failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

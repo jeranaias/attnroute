@@ -5,6 +5,51 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.12] - 2026-02-11
+
+### Security
+- **Critical**: Added `safe_read_stdin()` with 10MB size limit to prevent memory exhaustion DoS
+  - Reads bytes directly via `sys.stdin.buffer` to prevent Unicode 4x memory amplification
+- **Critical**: Added `validate_path()` helper for path traversal prevention
+  - Windows Alternate Data Stream (ADS) detection (blocks `file.txt:hidden`)
+  - Windows reserved device name blocking (CON, NUL, COM1, etc.)
+  - Null byte injection prevention
+- **Critical**: Added `validate_plugin_name()` to prevent path traversal via plugin names
+- **Critical**: Improved atomic writes with `safe_atomic_write()` - cross-platform support with fallback
+  - mkdir now inside try block to catch PermissionError
+
+### Fixed
+- **Reliability**: TOCTOU race conditions eliminated - replaced 20+ `exists()` checks with try/except patterns
+  - Fixed in: context_router.py, learner.py, freshness.py, oracle.py, history.py, session_init.py,
+    telemetry_lib.py, plugins/base.py, plugins/__init__.py
+- **Reliability**: Windows atomic write failures now fall back to direct write instead of silent failure
+- **Reliability**: Null-safe handling for `files_used`/`files_injected` in learner.py
+  - Changed `turn.get("files_used", [])` to `turn.get("files_used") or []` pattern
+- **Reliability**: Path normalization for cross-platform consistency
+  - All relative paths now use forward slashes via `.replace("\\", "/")`
+  - Fixed in: indexer.py (4 locations), learner.py, freshness.py
+- **Reliability**: Missing `encoding="utf-8"` added to context_router.py history append
+- **Reliability**: JSON type validation added to all `load_*()` functions to prevent crashes on corrupt data
+  - `load_stats_cache()`, `load_router_overrides()`, `load_session_state()` now validate dict type
+  - Plugin `load_state()`, `is_enabled()` now validate dict structure
+  - Oracle `_load_costs()` validates nested dict structure
+- **Performance**: Log rotation (`rotate_jsonl`) now uses seek-from-end to avoid loading entire file
+  - Prevents memory issues on large turns.jsonl files (>500 entries)
+- **Debugging**: Added error logging to all plugin lifecycle hooks (on_prompt_pre, on_prompt_post, on_stop, on_session_start)
+- **Debugging**: Added error logging to search query failures (now logs before falling back to keywords)
+- **Debugging**: Added error logging to learner docs root scanning
+- **Debugging**: Plugin save_state failures now log warnings instead of silently failing
+
+### Changed
+- All file I/O now uses centralized `compat.py` security helpers
+- Learner, plugins, context_router, and telemetry now use `safe_atomic_write()` for state persistence
+- Plugin base class now validates plugin names on initialization
+- Safer Windows stdout suppression in indexer using `contextlib.redirect_stdout`
+- All fallback writes now use `flush()` for better durability
+- `_set_plugin_enabled()` now validates plugin names before use
+- Oracle and telemetry_record fallback writes use flush() for crash safety
+- `atomic_jsonl_append()` now calls `flush()` after write for durability
+
 ## [0.5.11] - 2026-02-11
 
 ### Fixed
@@ -213,6 +258,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `attnroute init` and `attnroute status` commands
 - Zero required dependencies
 
+[0.5.12]: https://github.com/jeranaias/attnroute/compare/v0.5.11...v0.5.12
 [0.5.11]: https://github.com/jeranaias/attnroute/compare/v0.5.10...v0.5.11
 [0.5.10]: https://github.com/jeranaias/attnroute/compare/v0.5.9...v0.5.10
 [0.5.9]: https://github.com/jeranaias/attnroute/compare/v0.5.8...v0.5.9

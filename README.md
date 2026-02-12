@@ -68,7 +68,7 @@ attnroute is a **hook system for [Claude Code](https://github.com/anthropics/cla
 
 **The core innovation**: attnroute maintains a "working memory" of your codebase—tracking which files you interact with, learning co-activation patterns, and using PageRank on dependency graphs to rank importance.
 
-**v0.5.7 adds source code routing**: The search index now covers your actual source tree, not just `.claude/*.md` docs. Source files matched by BM25 get tree-sitter outline injection (function signatures, class definitions, imports)—not raw file content. No config needed—just works.
+**v0.5.7+ source code routing**: The search index covers your actual source tree, not just `.claude/*.md` docs. Source files matched by BM25 get tree-sitter outline injection (function signatures, class definitions, imports)—not raw file content. No config needed—just works.
 
 ### Verified Performance
 
@@ -146,6 +146,7 @@ attnroute transforms Claude Code from a "read everything" approach to a "read wh
 - **Invisible operation**: Works in the background via Claude Code hooks
 - **Graceful degradation**: Falls back gracefully if optional dependencies unavailable
 - **Cross-platform**: Windows, macOS, Linux
+- **Security hardened**: Path traversal prevention, atomic writes, input validation (v0.5.12)
 - **Verified benchmarks**: Measured with tiktoken cl100k_base on real codebases
 
 ---
@@ -619,7 +620,7 @@ attnroute status
 # Output:
 # attnroute Status
 # ══════════════════════════════════════════════════════════════
-# Version: 0.5.0
+# Version: 0.5.12
 # Features:
 #   ✓ BM25 search
 #   ✓ Semantic search
@@ -650,6 +651,7 @@ attnroute works invisibly in the background. Every prompt you send automatically
 # Setup & Status
 attnroute init              # Set up hooks for current project
 attnroute status            # Show configuration and features
+attnroute validate          # Verify installation is working
 attnroute version           # Show version info
 
 # Reporting
@@ -1100,6 +1102,31 @@ pip install attnroute[all]
 
 ---
 
+## Security
+
+attnroute v0.5.12 includes comprehensive security hardening:
+
+### Input Validation
+- **Stdin size limits**: 10MB max to prevent memory exhaustion attacks
+- **Path traversal prevention**: All file paths validated against allowed directories
+- **Plugin name validation**: Blocks path separators, null bytes, and Windows reserved names
+
+### Platform-Specific Protections
+- **Windows ADS blocking**: Detects and blocks Alternate Data Stream paths (`file.txt:hidden`)
+- **Reserved name blocking**: Blocks Windows device names (CON, NUL, COM1, etc.)
+- **Null byte injection prevention**: Validates paths contain no null bytes
+
+### Data Integrity
+- **Atomic file writes**: State files use temp-file-then-rename pattern
+- **Type validation**: All JSON loaders validate expected types
+- **TOCTOU elimination**: 20+ race conditions fixed with try/except patterns
+
+### Reporting Issues
+
+If you discover a security vulnerability, please email jeranaias@gmail.com directly rather than opening a public issue.
+
+---
+
 ## Contributing
 
 ```bash
@@ -1163,7 +1190,7 @@ SOFTWARE.
 
 This project emerged from frustration with Claude Code's "read everything" approach on large codebases. After watching Claude waste tokens on irrelevant files over and over, I built attnroute to solve the problem once and for all.
 
-The core insight: **attention is all you need** (in the literal sense). By tracking which files you actually interact with, learning co-activation patterns, and ranking by dependency importance, we can predict what Claude needs to see with 98%+ accuracy.
+The core insight: **attention is all you need** (in the literal sense). By tracking which files you actually interact with, learning co-activation patterns, and ranking by dependency importance, we can reduce context tokens by 90%+ while still providing Claude the files it needs.
 
 ---
 

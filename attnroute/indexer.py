@@ -60,23 +60,15 @@ try:
     # bm25s's C extension prints directly to stdout during import
     import os
     if os.name == 'nt':  # Windows
-        # Temporarily redirect stdout FD to devnull
-        # Must flush and recreate file object for FD redirect to work
-        import sys as _sys
-        _sys.stdout.flush()
-        stdout_fd = _sys.stdout.fileno()
-        old_stdout = os.dup(stdout_fd)
-        devnull_fd = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull_fd, stdout_fd)
-        _sys.stdout = os.fdopen(stdout_fd, 'w')
+        # Use contextlib.redirect_stdout for safer suppression
         try:
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):
+                import bm25s
+        except Exception:
+            # If redirect fails, just import normally (warning will print)
             import bm25s
-        finally:
-            # Restore stdout
-            _sys.stdout.flush()
-            os.dup2(old_stdout, stdout_fd)
-            _sys.stdout = os.fdopen(old_stdout, 'w')
-            os.close(devnull_fd)
     else:
         import bm25s
     BM25_AVAILABLE = True
@@ -271,7 +263,7 @@ class SearchIndex:
                     continue
                 try:
                     content = md_file.read_text(encoding="utf-8", errors="replace")
-                    rel_path = str(md_file.relative_to(docs_root.parent))
+                    rel_path = str(md_file.relative_to(docs_root.parent)).replace("\\", "/")
                     documents.append({
                         "path": rel_path,
                         "content": content,
@@ -310,7 +302,7 @@ class SearchIndex:
                     continue
 
                 try:
-                    rel_path = str(code_file.relative_to(code_root))
+                    rel_path = str(code_file.relative_to(code_root)).replace("\\", "/")
 
                     # Try to get outline if available
                     outline = ""
@@ -374,7 +366,7 @@ class SearchIndex:
                 for md_file in docs_root.rglob("*.md"):
                     if md_file.name.startswith("."):
                         continue
-                    rel_path = str(md_file.relative_to(docs_root.parent))
+                    rel_path = str(md_file.relative_to(docs_root.parent)).replace("\\", "/")
                     try:
                         current_mtime = md_file.stat().st_mtime
                         if rel_path not in existing or existing[rel_path] < current_mtime:
@@ -408,7 +400,7 @@ class SearchIndex:
                         if file_size > SOURCE_MAX_FILE_SIZE:
                             continue
 
-                        rel_path = str(code_file.relative_to(code_root))
+                        rel_path = str(code_file.relative_to(code_root)).replace("\\", "/")
                         current_mtime = code_file.stat().st_mtime
 
                         if rel_path not in existing or existing[rel_path] < current_mtime:
@@ -455,7 +447,7 @@ class SearchIndex:
                 self._bm25.index(tokenized)
                 self._bm25_paths = paths
             except Exception as e:
-                print(f"[indexer] BM25 index failed: {e}", file=sys.stderr)
+                print(f"[indexer] BM25 index build failed: {e}", file=sys.stderr)
                 self._bm25 = None
         else:
             # Fallback to TF-IDF

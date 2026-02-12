@@ -59,23 +59,28 @@ def load_history(
     file_pattern: str = None,
     transitions_only: bool = False
 ) -> list:
-    """Load and filter history entries."""
-    if not HISTORY_FILE.exists():
-        return []
-
+    """Load and filter history entries (TOCTOU-safe)."""
     cutoff = datetime.now() - since if since else None
     entries = []
 
-    with open(HISTORY_FILE, encoding="utf-8", errors="replace") as f:
+    try:
+        f = open(HISTORY_FILE, encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return []
+
+    with f:
         for line in f:
             try:
                 entry = json.loads(line.strip())
 
                 # Time filter
                 if cutoff:
-                    entry_time = datetime.fromisoformat(entry["timestamp"])
-                    if entry_time < cutoff:
-                        continue
+                    try:
+                        entry_time = datetime.fromisoformat(entry["timestamp"])
+                        if entry_time < cutoff:
+                            continue
+                    except (ValueError, KeyError):
+                        continue  # Skip entries with malformed timestamps
 
                 # Instance filter
                 if instance and entry.get("instance_id") != instance:
@@ -178,7 +183,10 @@ def format_changelog(entries: list) -> str:
     current_day = None
 
     for entry in entries:
-        ts = datetime.fromisoformat(entry["timestamp"])
+        try:
+            ts = datetime.fromisoformat(entry["timestamp"])
+        except (ValueError, KeyError):
+            continue  # Skip entries with malformed timestamps
         day = ts.strftime("%Y-%m-%d")
 
         if day != current_day:

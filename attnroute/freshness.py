@@ -32,7 +32,8 @@ except ImportError:
         windows_utf8_io()
     except ImportError:
         TELEMETRY_DIR = Path.home() / ".claude" / "telemetry"
-        def ensure_telemetry_dir(): TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
+        def ensure_telemetry_dir():
+            TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
 
 # Cache file
 FRESHNESS_CACHE = TELEMETRY_DIR / "freshness_cache.json"
@@ -45,7 +46,8 @@ except ImportError:
         from outliner import TREE_SITTER_AVAILABLE, extract_outline
     except ImportError:
         TREE_SITTER_AVAILABLE = False
-        def extract_outline(path): return None
+        def extract_outline(path):
+            return None
 
 
 # ============================================================================
@@ -67,17 +69,17 @@ class StalenessChecker:
         self._recheck_interval = 10  # Recheck every N turns
 
         # Build symbol index on first use
-        self._symbols: set[str] | None = None
-        self._files: set[str] | None = None
+        # Use Optional for Python 3.9 compatibility
+        from typing import Optional, Set
+        self._symbols: Optional[Set[str]] = None
+        self._files: Optional[Set[str]] = None
 
     def _load_cache(self) -> dict:
-        """Load freshness cache."""
-        if FRESHNESS_CACHE.exists():
-            try:
-                return json.loads(FRESHNESS_CACHE.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return {}
+        """Load freshness cache (TOCTOU-safe)."""
+        try:
+            return json.loads(FRESHNESS_CACHE.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
 
     def _save_cache(self):
         """Save freshness cache."""
@@ -192,10 +194,19 @@ class StalenessChecker:
         if ref in symbols:
             return True
 
-        # Check as direct file path
-        path = self.codebase_root / ref
-        if path.exists():
+        # Check as direct file path (TOCTOU-safe, with path traversal protection)
+        try:
+            path = (self.codebase_root / ref).resolve()
+            # Ensure resolved path is still under codebase root (prevent path traversal)
+            codebase_resolved = self.codebase_root.resolve()
+            try:
+                path.relative_to(codebase_resolved)
+            except ValueError:
+                return False  # Path escapes codebase root - reject
+            path.stat()  # Use stat() instead of exists()
             return True
+        except (FileNotFoundError, OSError):
+            pass
 
         return False
 
@@ -211,7 +222,7 @@ class StalenessChecker:
             (staleness_score, list_of_stale_references)
             staleness_score is 0.0-1.0 (higher = more stale)
         """
-        path_key = str(md_path)
+        path_key = str(md_path).replace("\\", "/")
 
         # Check cache
         if not force and path_key in self.cache:

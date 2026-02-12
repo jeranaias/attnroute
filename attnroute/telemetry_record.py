@@ -45,6 +45,7 @@ except ImportError:
         )
         windows_utf8_io()
     except ImportError:
+        print("[attnroute] telemetry_record: telemetry_lib import failed, hook disabled", file=sys.stderr)
         sys.exit(0)
 
 try:
@@ -70,9 +71,14 @@ except ImportError:
 
 
 def parse_stdin():
-    """Parse Stop hook stdin JSON."""
+    """Parse Stop hook stdin JSON with size limit for security."""
     try:
-        data = json.loads(sys.stdin.read())
+        # Import safe_read_stdin to prevent memory exhaustion
+        try:
+            from attnroute.compat import safe_read_stdin
+        except ImportError:
+            from compat import safe_read_stdin
+        data = json.loads(safe_read_stdin())
         return data
     except Exception:
         return {}
@@ -343,10 +349,7 @@ def get_confidence_summary() -> str:
 
 
 def read_last_turn():
-    """Read turns.jsonl once and return (lines, last_entry) or (None, None)."""
-    if not TURNS_FILE.exists():
-        return None, None
-
+    """Read turns.jsonl once and return (lines, last_entry) or (None, None). TOCTOU-safe."""
     try:
         with open(TURNS_FILE, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -356,7 +359,7 @@ def read_last_turn():
 
         last = json.loads(lines[-1])
         return lines, last
-    except Exception:
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None, None
 
 
@@ -404,8 +407,20 @@ def update_last_turn(
 
     try:
         lines[-1] = json.dumps(last) + "\n"
-        with open(TURNS_FILE, "w", encoding="utf-8") as f:
-            f.writelines(lines)
+        content = "".join(lines)
+        # Use atomic write to prevent data loss on crash
+        try:
+            from attnroute.compat import safe_atomic_write
+            if not safe_atomic_write(TURNS_FILE, content):
+                # Atomic write failed, try direct write with flush as fallback
+                with open(TURNS_FILE, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+                    f.flush()
+        except ImportError:
+            # Direct write with flush as best-effort fallback
+            with open(TURNS_FILE, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+                f.flush()
     except Exception:
         pass
 
@@ -459,8 +474,9 @@ def maybe_run_optimizer(force: bool = False):
                             cwd=str(Path.cwd())
                         )
                         break
-                state["last_optimization_turn"] = total_turns
-                save_session_state(state)
+            # Save state for BOTH entry point and script fallback paths
+            state["last_optimization_turn"] = total_turns
+            save_session_state(state)
         except Exception:
             pass
 
@@ -489,8 +505,8 @@ def main():
                 warning = plugin.on_stop(tool_calls, session_state)
                 if warning:
                     print(warning, file=sys.stderr)
-            except Exception:
-                pass  # Never fail the hook due to plugins
+            except Exception as e:
+                print(f"[attnroute] Plugin {getattr(plugin, 'name', 'unknown')}.on_stop failed: {e}", file=sys.stderr)
 
     # Read turns.jsonl ONCE (avoid triple-read)
     turn_lines, last_entry = read_last_turn()

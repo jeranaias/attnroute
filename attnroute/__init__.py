@@ -17,7 +17,7 @@ Quick start:
     attnroute status
 """
 
-__version__ = "0.5.11"
+__version__ = "0.5.12"
 __author__ = "jeranaias"
 __all__ = [
     "__version__",

@@ -23,11 +23,13 @@ The learner runs automatically:
 
 import json
 import re
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from attnroute.compat import try_import
+from attnroute.compat import safe_atomic_write, try_import
 
 # Import telemetry lib
 _telem_imports, TELEMETRY_LIB_AVAILABLE = try_import(
@@ -86,6 +88,7 @@ MATURITY_LEVELS = [
 MATURITY_BOOST_WEIGHT = {
     "observing": 0.0,   # Don't boost until we have data
     "active":    0.35,  # Full confidence after 25 turns
+    "wise":      0.45,  # Fallback for very old sessions (unused but defined for safety)
 }
 
 # Learning parameters
@@ -124,7 +127,8 @@ def auto_extract_keywords(docs_root: Path) -> dict[str, list[str]]:
 
     try:
         md_files = list(docs_root.rglob("*.md"))
-    except Exception:
+    except Exception as e:
+        print(f"[learner] Failed to scan docs root {docs_root}: {e}", file=sys.stderr)
         return {}
 
     for md_file in md_files:
@@ -191,7 +195,7 @@ def auto_extract_keywords(docs_root: Path) -> dict[str, list[str]]:
 # FILE RELATIONSHIPS (migrated from usage_tracker.py)
 # ============================================================================
 
-def extract_file_relationships(md_file: Path) -> dict[str, any]:
+def extract_file_relationships(md_file: Path) -> dict[str, Any]:
     """
     Extract file references and keywords from .claude/*.md file.
 
@@ -253,7 +257,7 @@ def build_file_relationship_map(claude_dir: Path | None = None) -> dict[str, dic
     try:
         for md_file in claude_dir.rglob("*.md"):
             try:
-                rel_path = str(md_file.relative_to(claude_dir.parent))
+                rel_path = str(md_file.relative_to(claude_dir.parent)).replace("\\", "/")
                 relationships[rel_path] = extract_file_relationships(md_file)
             except ValueError:
                 continue
@@ -291,7 +295,7 @@ class Learner:
     # ---- Persistence ----
 
     def _load(self) -> dict:
-        """Load learned state from disk."""
+        """Load learned state from disk (TOCTOU-safe)."""
         default_state = {
             "version": 2,
             "meta": {
@@ -308,37 +312,27 @@ class Learner:
             "usefulness": {},               # file → {injected, accessed, edited, score}
         }
 
-        if LEARNED_STATE_FILE.exists():
-            try:
-                data = json.loads(LEARNED_STATE_FILE.read_text(encoding="utf-8"))
-                # Validate structure: ensure required keys exist
-                if not isinstance(data, dict) or "meta" not in data:
-                    return default_state
-                # Merge with defaults to handle version upgrades
-                for key in default_state:
-                    if key not in data:
-                        data[key] = default_state[key]
-                return data
-            except (json.JSONDecodeError, UnicodeDecodeError, Exception):
-                # Corrupt file - return fresh state
-                pass
-
-        return default_state
+        # Use try/except instead of exists() to avoid TOCTOU race
+        try:
+            data = json.loads(LEARNED_STATE_FILE.read_text(encoding="utf-8"))
+            # Validate structure: ensure required keys exist
+            if not isinstance(data, dict) or "meta" not in data:
+                return default_state
+            # Merge with defaults to handle version upgrades
+            for key in default_state:
+                if key not in data:
+                    data[key] = default_state[key]
+            return data
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError):
+            # File doesn't exist or is corrupt - return fresh state
+            return default_state
 
     def _save(self):
-        """Persist learned state to disk."""
+        """Persist learned state to disk using atomic write with fallback."""
         ensure_telemetry_dir()
-        try:
-            # Atomic write: write to temp file, then rename
-            temp_file = LEARNED_STATE_FILE.with_suffix('.tmp')
-            temp_file.write_text(
-                json.dumps(self.state, indent=2, default=str),
-                encoding="utf-8"
-            )
-            # Atomic rename (safe on POSIX and Windows)
-            temp_file.replace(LEARNED_STATE_FILE)
-        except Exception:
-            pass
+        content = json.dumps(self.state, indent=2, default=str)
+        if not safe_atomic_write(LEARNED_STATE_FILE, content):
+            print("[learner] Warning: Failed to save learned state", file=sys.stderr)
 
     def _compute_maturity(self) -> str:
         """Determine maturity level from observation count."""
@@ -432,8 +426,8 @@ class Learner:
         base_lr = 0.08 if self.turns_learned < 100 else 0.04
 
         for turn in turns:
-            files_used = turn.get("files_used", [])
-            files_injected = turn.get("files_injected", [])
+            files_used = turn.get("files_used") or []
+            files_injected = turn.get("files_injected") or []
             prompt = turn.get("prompt_keywords", [])
 
             # Reconstruct prompt words from keywords if available, else skip
@@ -494,7 +488,7 @@ class Learner:
         pair_turns = defaultdict(set)       # (file_a, file_b) → set of turn indices
 
         for i, turn in enumerate(turns):
-            hot_files = turn.get("files_injected", [])[:6]  # Top files only
+            hot_files = (turn.get("files_injected") or [])[:6]  # Top files only
             for f in hot_files:
                 file_turns[f].add(i)
             # Track pairs
@@ -532,7 +526,7 @@ class Learner:
         # Track activation turns per file
         file_active_turns = defaultdict(list)
         for i, turn in enumerate(turns):
-            for f in turn.get("files_injected", []):
+            for f in turn.get("files_injected") or []:
                 file_active_turns[f].append(i)
 
         rhythms = {}

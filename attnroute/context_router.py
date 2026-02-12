@@ -38,7 +38,7 @@ import re
 from datetime import datetime
 
 # Import utilities for cleaner import handling
-from attnroute.compat import LazyLoader, try_import
+from attnroute.compat import LazyLoader, safe_read_stdin, try_import
 
 # Import telemetry lib
 _telemetry_imports, TELEMETRY_LIB_AVAILABLE = try_import(
@@ -633,19 +633,22 @@ _COMPILED_KEYWORDS: dict[str, re.Pattern] = _build_compiled_keywords(KEYWORDS)
 
 def get_state_file() -> Path:
     """Get appropriate state file (project-local preferred)."""
-    if PROJECT_STATE.parent.exists():
+    # Use try/except instead of exists() to avoid TOCTOU race
+    try:
+        PROJECT_STATE.parent.mkdir(parents=True, exist_ok=True)
         return PROJECT_STATE
-    GLOBAL_STATE.parent.mkdir(parents=True, exist_ok=True)
-    return GLOBAL_STATE
+    except OSError:
+        GLOBAL_STATE.parent.mkdir(parents=True, exist_ok=True)
+        return GLOBAL_STATE
 
 
 def load_state(state_file: Path) -> dict:
-    """Load attention state from file."""
-    if state_file.exists():
-        try:
-            return json.loads(state_file.read_text(encoding='utf-8'))
-        except json.JSONDecodeError:
-            pass
+    """Load attention state from file (TOCTOU-safe)."""
+    # Use try/except instead of exists() to avoid race conditions
+    try:
+        return json.loads(state_file.read_text(encoding='utf-8'))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
 
     # Initialize fresh state
     return {
@@ -657,13 +660,13 @@ def load_state(state_file: Path) -> dict:
 
 
 def save_state(state_file: Path, state: dict) -> None:
-    """Save attention state to file (atomic write to prevent corruption)."""
+    """Save attention state to file using atomic write with fallback."""
+    from attnroute.compat import safe_atomic_write
     state["last_update"] = datetime.now().isoformat()
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    # H2: Atomic write - write to temp file then rename
-    temp_file = state_file.with_suffix('.tmp')
-    temp_file.write_text(json.dumps(state, indent=2), encoding='utf-8')
-    temp_file.replace(state_file)
+    content = json.dumps(state, indent=2)
+    if not safe_atomic_write(state_file, content):
+        print(f"[attnroute] Warning: Failed to save state to {state_file}", file=sys.stderr)
 
 
 # ============================================================================
@@ -769,8 +772,9 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
                                 _evict_lowest_source(state, path, boost)
                                 if path in state["scores"]:
                                     directly_activated.add(path)
-        except Exception:
+        except Exception as e:
             # Fallback to keyword activation if search fails
+            print(f"[attnroute] Search query failed, using keyword fallback: {e}", file=sys.stderr)
             _keyword_activate(state, prompt_lower, directly_activated)
     else:
         # No search available - use keyword activation
@@ -1291,7 +1295,7 @@ def append_history(state: dict, prev_state: dict, activated: set[str], prompt: s
             HISTORY_FILE.parent.mkdir(exist_ok=True)
             HISTORY_FILE.touch()
 
-        with open(HISTORY_FILE, "a") as f:
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass  # Don't fail hook on history write error
@@ -1467,8 +1471,8 @@ def main():
     """
     global MAX_HOT_FILES, MAX_WARM_FILES, MAX_TOTAL_CHARS  # C1: Allow modification in notification clamping
 
-    # Parse input - C3: Buffer stdin before parsing to allow fallback
-    raw_input = sys.stdin.read() if sys.stdin else ""
+    # Parse input - use safe_read_stdin to prevent memory exhaustion DoS
+    raw_input = safe_read_stdin()
     try:
         input_data = json.loads(raw_input)
         if not isinstance(input_data, dict):
@@ -1521,8 +1525,8 @@ def main():
                 prompt, should_continue = plugin.on_prompt_pre(prompt, state)
                 if not should_continue:
                     return
-            except Exception:
-                pass  # Never fail the hook due to plugins
+            except Exception as e:
+                print(f"[attnroute] Plugin {getattr(plugin, 'name', 'unknown')}.on_prompt_pre failed: {e}", file=sys.stderr)
 
     # Build output
     output, stats = build_context_output(state, docs_root)
@@ -1535,8 +1539,8 @@ def main():
                 additional = plugin.on_prompt_post(prompt, output, state)
                 if additional:
                     output = output + additional
-            except Exception:
-                pass  # Never fail the hook due to plugins
+            except Exception as e:
+                print(f"[attnroute] Plugin {getattr(plugin, 'name', 'unknown')}.on_prompt_post failed: {e}", file=sys.stderr)
 
     # Append to history log (before save, so turn_count is correct)
     append_history(state, prev_state, activated, prompt, stats)

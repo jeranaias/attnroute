@@ -115,26 +115,45 @@ def atomic_jsonl_append(path: Path, record: dict):
     line = json.dumps(record, default=str) + "\n"
     with open(path, "a", encoding="utf-8") as f:
         f.write(line)
+        f.flush()
 
 
 def rotate_jsonl(path: Path, max_lines: int = 500):
-    """Keep only the last max_lines entries in a JSONL file."""
-    if not path.exists():
-        return
+    """Keep only the last max_lines entries in a JSONL file.
+
+    Uses seek-from-end to avoid reading entire file into memory.
+    """
     try:
-        with open(path, encoding='utf-8', errors='replace') as f:
-            lines = f.readlines()
-        if len(lines) > max_lines:
+        file_size = path.stat().st_size
+        if file_size == 0:
+            return
+
+        # Estimate bytes to read (assume ~500 bytes per line average)
+        # Read more than needed to ensure we get enough lines
+        bytes_to_read = min(file_size, max_lines * 600)
+
+        with open(path, 'rb') as f:
+            if file_size > bytes_to_read:
+                f.seek(file_size - bytes_to_read)
+                # Skip partial first line
+                f.readline()
+            content = f.read()
+
+        # Decode and split into lines
+        lines = content.decode('utf-8', errors='replace').splitlines(keepends=True)
+
+        # Only rewrite if we have too many lines AND file was larger than our read
+        if file_size > bytes_to_read and len(lines) >= max_lines:
+            # Keep last max_lines
             with open(path, 'w', encoding='utf-8') as f:
                 f.writelines(lines[-max_lines:])
-    except Exception:
+                f.flush()
+    except (FileNotFoundError, OSError):
         pass
 
 
 def load_turns(n: int = 25, project: str = None) -> list:
-    """Load last N turn records, optionally filtered by project."""
-    if not TURNS_FILE.exists():
-        return []
+    """Load last N turn records, optionally filtered by project (TOCTOU-safe)."""
     entries = []
     try:
         with open(TURNS_FILE, encoding="utf-8", errors="replace") as f:
@@ -149,7 +168,7 @@ def load_turns(n: int = 25, project: str = None) -> list:
                     entries.append(entry)
                 except json.JSONDecodeError:
                     continue
-    except Exception:
+    except (FileNotFoundError, OSError):
         return []
     return entries[-n:]
 
@@ -159,12 +178,12 @@ def load_turns(n: int = 25, project: str = None) -> list:
 # ============================================================================
 
 def load_stats_cache() -> dict:
-    """Load stats-cache.json (Claude Code's token tracking)."""
-    if not STATS_CACHE_FILE.exists():
-        return {}
+    """Load stats-cache.json (Claude Code's token tracking, TOCTOU-safe)."""
     try:
-        return json.loads(STATS_CACHE_FILE.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
+        data = json.loads(STATS_CACHE_FILE.read_text(encoding="utf-8", errors="replace"))
+        # Type validation: ensure we return a dict
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
@@ -173,12 +192,12 @@ def load_stats_cache() -> dict:
 # ============================================================================
 
 def load_router_overrides() -> dict:
-    """Load auto-tuned router parameter overrides."""
-    if not ROUTER_OVERRIDES_FILE.exists():
-        return {}
+    """Load auto-tuned router parameter overrides (TOCTOU-safe)."""
     try:
-        return json.loads(ROUTER_OVERRIDES_FILE.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
+        data = json.loads(ROUTER_OVERRIDES_FILE.read_text(encoding="utf-8", errors="replace"))
+        # Type validation: ensure we return a dict
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
@@ -197,9 +216,15 @@ def load_project_overrides() -> dict:
 
 
 def save_router_overrides(data: dict):
-    """Save router overrides."""
+    """Save router overrides with atomic write."""
     ensure_telemetry_dir()
-    ROUTER_OVERRIDES_FILE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    try:
+        from attnroute.compat import safe_atomic_write
+        content = json.dumps(data, indent=2, default=str)
+        safe_atomic_write(ROUTER_OVERRIDES_FILE, content)
+    except ImportError:
+        # Fallback if compat not available
+        ROUTER_OVERRIDES_FILE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
 
 # ============================================================================
@@ -207,19 +232,25 @@ def save_router_overrides(data: dict):
 # ============================================================================
 
 def load_session_state() -> dict:
-    """Load current session state."""
-    if not SESSION_STATE_FILE.exists():
-        return {}
+    """Load current session state (TOCTOU-safe)."""
     try:
-        return json.loads(SESSION_STATE_FILE.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
+        data = json.loads(SESSION_STATE_FILE.read_text(encoding="utf-8", errors="replace"))
+        # Type validation: ensure we return a dict
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
 def save_session_state(data: dict):
-    """Save session state."""
+    """Save session state with atomic write."""
     ensure_telemetry_dir()
-    SESSION_STATE_FILE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    try:
+        from attnroute.compat import safe_atomic_write
+        content = json.dumps(data, indent=2, default=str)
+        safe_atomic_write(SESSION_STATE_FILE, content)
+    except ImportError:
+        # Fallback if compat not available
+        SESSION_STATE_FILE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
 
 # ============================================================================

@@ -113,23 +113,49 @@ def disable_plugin(name: str) -> bool:
 
 
 def _set_plugin_enabled(name: str, enabled: bool) -> bool:
-    """Set plugin enabled state in config."""
+    """Set plugin enabled state in config (TOCTOU-safe)."""
     global _discovered, _plugins
+
+    # Validate plugin name to prevent path traversal
+    try:
+        from attnroute.compat import validate_plugin_name, safe_atomic_write
+        validate_plugin_name(name)
+    except ImportError:
+        # Fallback: basic validation
+        if '/' in name or '\\' in name or '..' in name:
+            print(f"[attnroute] Invalid plugin name: {name}", file=sys.stderr)
+            return False
+        safe_atomic_write = None
+    except ValueError as e:
+        print(f"[attnroute] {e}", file=sys.stderr)
+        return False
+
     config_file = Path.home() / ".claude" / "plugins" / "config.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
 
-    config = {}
-    if config_file.exists():
-        try:
-            config = json.loads(config_file.read_text(encoding="utf-8"))
-        except Exception as e:
+    # TOCTOU-safe: use try/except instead of exists()
+    try:
+        config = json.loads(config_file.read_text(encoding="utf-8"))
+        # Type validation: ensure we get a dict
+        if not isinstance(config, dict):
+            print("[attnroute] Config is not a dict, using defaults", file=sys.stderr)
+            config = {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+        if not isinstance(e, FileNotFoundError):
             print(f"[attnroute] Config parse failed, using defaults: {e}", file=sys.stderr)
+        config = {}
 
     if "enabled" not in config:
         config["enabled"] = {}
 
     config["enabled"][name] = enabled
-    config_file.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    # Use atomic write if available
+    content = json.dumps(config, indent=2)
+    if safe_atomic_write:
+        safe_atomic_write(config_file, content)
+    else:
+        config_file.write_text(content, encoding="utf-8")
 
     # Re-discover to apply changes
     with _lock:

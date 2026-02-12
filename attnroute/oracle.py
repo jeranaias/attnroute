@@ -82,30 +82,44 @@ class CostOracle:
     def __init__(self):
         self.task_costs = self._load_costs()
 
-    def _load_costs(self) -> dict[str, dict]:
-        """Load task costs from learned_state.json."""
-        if LEARNED_STATE_FILE.exists():
-            try:
-                state = json.loads(LEARNED_STATE_FILE.read_text(encoding="utf-8"))
-                return state.get("task_costs", {})
-            except Exception:
-                pass
-        return {}
+    def _load_costs(self) -> dict:
+        """Load task costs from learned_state.json (TOCTOU-safe)."""
+        try:
+            state = json.loads(LEARNED_STATE_FILE.read_text(encoding="utf-8"))
+            # Type validation: ensure we get dicts
+            if not isinstance(state, dict):
+                return {}
+            costs = state.get("task_costs", {})
+            return costs if isinstance(costs, dict) else {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
 
     def _save_costs(self):
-        """Save task costs to learned_state.json."""
+        """Save task costs to learned_state.json (TOCTOU-safe)."""
         ensure_telemetry_dir()
         try:
-            if LEARNED_STATE_FILE.exists():
+            # Use try/except instead of exists() to avoid race condition
+            try:
                 state = json.loads(LEARNED_STATE_FILE.read_text(encoding="utf-8"))
-            else:
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
                 state = {}
 
             state["task_costs"] = self.task_costs
-            LEARNED_STATE_FILE.write_text(
-                json.dumps(state, indent=2, default=str),
-                encoding="utf-8"
-            )
+
+            # Use atomic write if available
+            try:
+                from attnroute.compat import safe_atomic_write
+                content = json.dumps(state, indent=2, default=str)
+                if not safe_atomic_write(LEARNED_STATE_FILE, content):
+                    # Fallback with flush
+                    with open(LEARNED_STATE_FILE, "w", encoding="utf-8") as f:
+                        f.write(content)
+                        f.flush()
+            except ImportError:
+                # Fallback with flush as best-effort
+                with open(LEARNED_STATE_FILE, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(state, indent=2, default=str))
+                    f.flush()
         except Exception:
             pass
 
@@ -121,16 +135,20 @@ class CostOracle:
         # Score each task type
         scores = defaultdict(int)
 
+        # Use word boundary matching to avoid substring false positives
+        import re
         for task_type, keywords in TASK_KEYWORDS.items():
             for kw in keywords:
-                if kw in prompt_text:
+                # Match whole word to avoid "fix" matching "suffix"
+                if re.search(r'\b' + re.escape(kw) + r'\b', prompt_text):
                     scores[task_type] += 1
 
         # File-based heuristics
         file_extensions = [Path(f).suffix for f in files_touched]
         if ".json" in file_extensions or ".yaml" in file_extensions or ".yml" in file_extensions:
             scores["config"] += 2
-        if ".test." in " ".join(files_touched) or "_test." in " ".join(files_touched):
+        # Check for test files properly (avoid substring false positives)
+        if any(".test." in Path(f).name or "_test." in Path(f).name or f.endswith("_test.py") for f in files_touched):
             scores["review"] += 1
 
         # Return highest scoring type, or "exploration" as default
@@ -168,7 +186,7 @@ class CostOracle:
 
         self._save_costs()
 
-    def predict(self, task_type: str) -> dict | None:
+    def predict(self, task_type: str):
         """
         Predict cost for a task type.
 
@@ -199,14 +217,19 @@ class CostOracle:
         variance = sum((x - mean) ** 2 for x in samples) / n
         std = math.sqrt(variance)
 
-        # Percentiles
+        # Percentiles (with bounds checking)
         def percentile(data, p):
+            if not data:
+                return 0.0
             k = (len(data) - 1) * p / 100
-            f = math.floor(k)
-            c = math.ceil(k)
+            f = int(math.floor(k))
+            c = int(math.ceil(k))
+            # Ensure indices are within bounds
+            f = max(0, min(f, len(data) - 1))
+            c = max(0, min(c, len(data) - 1))
             if f == c:
-                return data[int(k)]
-            return data[int(f)] * (c - k) + data[int(c)] * (k - f)
+                return data[f]
+            return data[f] * (c - k) + data[c] * (k - f)
 
         # Confidence based on sample size
         if n >= 20:
@@ -227,7 +250,7 @@ class CostOracle:
             "confidence": confidence,
         }
 
-    def predict_range(self, task_type: str) -> tuple[float, float] | None:
+    def predict_range(self, task_type: str):
         """
         Get predicted cost range (P25-P75) for a task type.
 
@@ -298,7 +321,7 @@ class CostOracle:
             return f"Projected cost: ${pred['p25']:.2f}-${pred['p75']:.2f} ({top_task} task, {pred['samples']} samples)"
         return ""
 
-    def get_all_predictions(self) -> dict[str, dict]:
+    def get_all_predictions(self) -> dict:
         """Get predictions for all task types."""
         return {
             task_type: self.predict(task_type)
