@@ -5,6 +5,25 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.13] - 2026-02-12
+
+### Fixed
+- **Claims consistency**: Aligned token reduction claims to 90%+ across pyproject.toml, README, and benchmarks
+- **LoopBreaker bug**: `SIMILARITY_THRESHOLD` was declared but never used — added `_signature_similarity()` with Jaccard similarity for fuzzy loop detection
+- **Benchmark honesty**: Added methodology notes explaining baseline is theoretical maximum (all files concatenated), not a comparison to Claude Code's native behavior
+- **Benchmark language**: Replaced "BULLETPROOF"/"IMPENETRABLE" with neutral descriptions
+
+### Added
+- `benchmarks/README.md` with transparent methodology documentation
+- `tests/test_context_router.py` — 11 behavioral tests for tier classification, file detection, config coherence
+- 8 new behavioral tests in `test_core.py` for RepoMapper and Predictor
+- 5 new tests in `test_loopbreaker.py` for fuzzy similarity detection
+- 2 new tests in `test_graph_retriever.py`
+
+### Changed
+- README streamlined: removed straw-man scenarios, duplicate ASCII diagrams, marketing taglines (~300 lines removed)
+- `integrations.py` adapters marked as experimental (currently unused by core pipeline)
+
 ## [0.5.12] - 2026-02-11
 
 ### Security
@@ -258,6 +277,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `attnroute init` and `attnroute status` commands
 - Zero required dependencies
 
+[0.5.13]: https://github.com/jeranaias/attnroute/compare/v0.5.12...v0.5.13
 [0.5.12]: https://github.com/jeranaias/attnroute/compare/v0.5.11...v0.5.12
 [0.5.11]: https://github.com/jeranaias/attnroute/compare/v0.5.10...v0.5.11
 [0.5.10]: https://github.com/jeranaias/attnroute/compare/v0.5.9...v0.5.10

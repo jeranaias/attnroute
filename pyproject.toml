@@ -1,6 +1,6 @@
 [project]
 name = "attnroute"
-version = "0.5.12"
+version = "0.5.13"
 description = "Context routing for AI coding assistants - 90%+ token reduction"
 readme = "README.md"
 license = {text = "MIT"}

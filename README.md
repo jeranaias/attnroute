@@ -459,7 +459,7 @@ attnroute status
 # Output:
 # attnroute Status
 # ══════════════════════════════════════════════════════════════
-# Version: 0.5.12
+# Version: 0.5.13
 # Features:
 #   ✓ BM25 search
 #   ✓ Semantic search
@@ -853,7 +853,7 @@ pip install attnroute[all]
 
 ## Security
 
-attnroute v0.5.12 includes comprehensive security hardening:
+attnroute v0.5.13 includes comprehensive security hardening:
 
 ### Input Validation
 - **Stdin size limits**: 10MB max to prevent memory exhaustion attacks
