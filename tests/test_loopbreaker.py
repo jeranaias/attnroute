@@ -189,3 +189,53 @@ class TestLoopBreaker:
 
         state = plugin.load_state()
         assert len(state["recent_attempts"]) <= plugin.HISTORY_SIZE
+
+    def test_signature_similarity_identical(self, plugin):
+        """Identical signatures have similarity 1.0."""
+        sig = "Edit|/path/to/auth.py|def:login:password:username|"
+        assert plugin._signature_similarity(sig, sig) == 1.0
+
+    def test_signature_similarity_different_file(self, plugin):
+        """Different file paths have similarity 0.0."""
+        sig1 = "Edit|/path/to/auth.py|def:login:password|"
+        sig2 = "Edit|/path/to/other.py|def:login:password|"
+        assert plugin._signature_similarity(sig1, sig2) == 0.0
+
+    def test_signature_similarity_different_tool(self, plugin):
+        """Different tools have similarity 0.0."""
+        sig1 = "Edit|/path/to/auth.py|def:login|"
+        sig2 = "Bash|/path/to/auth.py|def:login|"
+        assert plugin._signature_similarity(sig1, sig2) == 0.0
+
+    def test_signature_similarity_partial_overlap(self, plugin):
+        """Overlapping identifiers produce partial similarity."""
+        sig1 = "Edit|/path/to/auth.py|def:login:password:username|"
+        sig2 = "Edit|/path/to/auth.py|def:login:passwd:user|"
+        sim = plugin._signature_similarity(sig1, sig2)
+        # "def" and "login" overlap; "password"/"username" vs "passwd"/"user" don't
+        assert 0.0 < sim < 1.0
+
+    def test_fuzzy_loop_detection(self, plugin):
+        """Similar but not identical edits should trigger fuzzy loop detection."""
+        plugin.on_session_start({})
+
+        # Three edits to same file with overlapping identifiers
+        # All share "def" and "login" but vary other identifiers
+        tc1 = [{"tool": "Edit", "target": "/path/to/auth.py",
+                "old_string": "def login(username, password):",
+                "new_string": "def login(username, password, flag):"}]
+        tc2 = [{"tool": "Edit", "target": "/path/to/auth.py",
+                "old_string": "def login(username, password):",
+                "new_string": "def login(user, pwd):"}]
+        tc3 = [{"tool": "Edit", "target": "/path/to/auth.py",
+                "old_string": "def login(username, password):",
+                "new_string": "def login(name, pass_hash):"}]
+
+        plugin.on_stop(tc1, {})
+        plugin.on_stop(tc2, {})
+        plugin.on_stop(tc3, {})
+
+        state = plugin.load_state()
+        # These all edit the same function (login) with the same identifiers
+        # (def, login, password, username) - should detect as loop
+        assert state["active_loop"] is not None

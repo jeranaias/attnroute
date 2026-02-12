@@ -249,10 +249,45 @@ class LoopBreakerPlugin(AttnroutePlugin):
             return ""
         return hashlib.md5(content.encode()).hexdigest()[:8]
 
+    def _signature_similarity(self, sig1: str, sig2: str) -> float:
+        """
+        Compute similarity between two signatures using Jaccard similarity
+        on the identifier components.
+
+        Signature format: "tool|path|identifiers|command"
+        """
+        parts1 = sig1.split("|")
+        parts2 = sig2.split("|")
+
+        if len(parts1) < 4 or len(parts2) < 4:
+            return 1.0 if sig1 == sig2 else 0.0
+
+        # Tool and path must match exactly
+        if parts1[0] != parts2[0] or parts1[1] != parts2[1]:
+            return 0.0
+
+        # Compare identifiers using Jaccard similarity
+        ids1 = set(parts1[2].split(":")) if parts1[2] else set()
+        ids2 = set(parts2[2].split(":")) if parts2[2] else set()
+
+        if not ids1 and not ids2:
+            # Both empty identifiers - compare commands
+            return 1.0 if parts1[3] == parts2[3] else 0.0
+
+        if not ids1 or not ids2:
+            return 0.0
+
+        intersection = ids1 & ids2
+        union = ids1 | ids2
+        return len(intersection) / len(union) if union else 0.0
+
     def _detect_loop(self, recent_attempts: list[dict]) -> dict | None:
         """
         Detect if recent attempts form a repetitive loop.
         Returns loop info if detected, None otherwise.
+
+        Uses SIMILARITY_THRESHOLD for fuzzy matching when exact
+        signature matches aren't found.
         """
         if len(recent_attempts) < self.LOOP_THRESHOLD:
             return None
@@ -273,7 +308,7 @@ class LoopBreakerPlugin(AttnroutePlugin):
             recent = attempts[-self.LOOP_THRESHOLD:]
             signatures = [a.get("signature", "") for a in recent]
 
-            # Count similar signatures
+            # Count exact signature matches
             if len(set(signatures)) == 1:
                 # All identical - definite loop
                 return {
@@ -283,7 +318,7 @@ class LoopBreakerPlugin(AttnroutePlugin):
                     "signatures": signatures,
                 }
 
-            # Check for partial similarity
+            # Check for exact partial similarity
             sig_counts: dict[str, int] = {}
             for sig in signatures:
                 sig_counts[sig] = sig_counts.get(sig, 0) + 1
@@ -293,7 +328,23 @@ class LoopBreakerPlugin(AttnroutePlugin):
                 return {
                     "file": file,
                     "count": max_count,
-                    "pattern_desc": "similar approach",
+                    "pattern_desc": "repeated approach",
+                    "signatures": signatures,
+                }
+
+            # Fuzzy similarity: check if most recent attempt is similar
+            # to enough previous attempts using SIMILARITY_THRESHOLD
+            reference_sig = signatures[-1]
+            similar_count = 1  # Count the reference itself
+            for sig in signatures[:-1]:
+                if self._signature_similarity(reference_sig, sig) >= self.SIMILARITY_THRESHOLD:
+                    similar_count += 1
+
+            if similar_count >= self.LOOP_THRESHOLD:
+                return {
+                    "file": file,
+                    "count": similar_count,
+                    "pattern_desc": "similar approach (fuzzy match)",
                     "signatures": signatures,
                 }
 
