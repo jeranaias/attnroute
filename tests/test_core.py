@@ -85,6 +85,82 @@ class TestCLI:
             assert hasattr(cli, cmd), f"Missing command: {cmd}"
 
 
+class TestRepoMapperBehavior:
+    """Test RepoMapper produces correct output for known inputs."""
+
+    def test_finds_functions(self, tmp_path):
+        """RepoMapper output includes function names from indexed files."""
+        from attnroute.repo_map import RepoMapper
+
+        py_file = tmp_path / "calculator.py"
+        py_file.write_text(
+            "def add(a, b):\n    return a + b\n\n"
+            "def subtract(a, b):\n    return a - b\n\n"
+            "class MathUtils:\n    def multiply(self, x, y):\n        return x * y\n"
+        )
+
+        mapper = RepoMapper(str(tmp_path))
+        mapper.index()
+        result = mapper.get_map()
+
+        assert "calculator.py" in result
+        symbols_found = sum(1 for name in ["add", "subtract", "MathUtils", "multiply"]
+                            if name in result)
+        assert symbols_found >= 1, f"Expected symbols in map, got: {result[:200]}"
+
+    def test_respects_token_budget(self, tmp_path):
+        """RepoMapper output respects token budget constraints."""
+        from attnroute.repo_map import RepoMapper
+
+        for i in range(10):
+            f = tmp_path / f"module_{i}.py"
+            f.write_text(f"def func_{i}():\n    pass\n\nclass Class_{i}:\n    pass\n")
+
+        mapper = RepoMapper(str(tmp_path))
+        mapper.index()
+
+        small_result = mapper.get_map(token_budget=100)
+        large_result = mapper.get_map(token_budget=5000)
+
+        assert len(small_result) <= len(large_result)
+
+    def test_excludes_pycache(self, tmp_path):
+        """RepoMapper should skip __pycache__ directories."""
+        from attnroute.repo_map import RepoMapper
+
+        cache = tmp_path / "__pycache__"
+        cache.mkdir()
+        (cache / "module.cpython-312.pyc").write_bytes(b"")
+        (tmp_path / "real_module.py").write_text("def real(): pass\n")
+
+        mapper = RepoMapper(str(tmp_path))
+        mapper.index()
+        result = mapper.get_map()
+
+        assert "real_module" in result
+        assert "__pycache__" not in result
+
+    def test_handles_empty_files(self, tmp_path):
+        """RepoMapper handles empty source files gracefully."""
+        from attnroute.repo_map import RepoMapper
+
+        (tmp_path / "empty.py").write_text("")
+        (tmp_path / "nonempty.py").write_text("x = 1\n")
+
+        mapper = RepoMapper(str(tmp_path))
+        mapper.index()
+        result = mapper.get_map()
+        assert isinstance(result, str)
+
+    def test_output_is_always_string(self, tmp_path):
+        """get_map always returns a string, even with no files."""
+        from attnroute.repo_map import RepoMapper
+
+        mapper = RepoMapper(str(tmp_path))
+        mapper.index()
+        assert isinstance(mapper.get_map(), str)
+
+
 class TestLearner:
     """Test learning functionality."""
 
@@ -98,6 +174,13 @@ class TestLearner:
         from attnroute.learner import Learner
         learner = Learner()
         assert learner is not None
+
+    def test_learner_has_state(self):
+        """Learner initializes with a state dict."""
+        from attnroute.learner import Learner
+        learner = Learner()
+        assert hasattr(learner, "state")
+        assert isinstance(learner.state, dict)
 
 
 class TestPredictor:
@@ -114,6 +197,33 @@ class TestPredictor:
         model = PredictorModelV5()
         result = predict_files_v5("test prompt", model, [])
         assert isinstance(result, list)
+
+    def test_predictor_returns_tuples(self):
+        """Predictor returns list of (path, score) tuples."""
+        from attnroute.predictor import PredictorModelV5, predict_files_v5
+
+        model = PredictorModelV5()
+        model.name_to_paths["main.py"] = {"src/main.py"}
+        model.file_popularity["src/main.py"] = 10
+
+        result = predict_files_v5("update main.py", model, ["src/main.py"])
+        assert isinstance(result, list)
+        for item in result:
+            assert isinstance(item, tuple)
+            assert len(item) == 2
+
+    def test_predictor_file_mention_boost(self):
+        """Predictor boosts files explicitly mentioned in prompt."""
+        from attnroute.predictor import PredictorModelV5, predict_files_v5
+
+        model = PredictorModelV5()
+        model.name_to_paths["auth.py"] = {"src/auth.py"}
+        model.name_to_paths["utils.py"] = {"src/utils.py"}
+
+        result = predict_files_v5("fix the bug in auth.py", model, [])
+        result_paths = [r[0] for r in result]
+        # auth.py should appear since it's mentioned by name
+        assert any("auth" in p for p in result_paths), f"Expected auth.py in results: {result_paths}"
 
 
 class TestDiagnostic:

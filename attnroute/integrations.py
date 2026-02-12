@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-attnroute.integrations — Integration Adapters
+attnroute.integrations — Integration Adapters (EXPERIMENTAL)
 
-Provides compatibility layers for:
+NOTE: These adapters are not currently used by attnroute's core pipeline.
+They are experimental integration points for potential future use with:
 - Claude-Mem: Use attnroute's attention routing with Claude-Mem's compression
 - Continuous-Claude: Export/import learned state in ledger format
 - Generic hooks: Easy integration with other context management tools
 
-Architecture:
-  attnroute ←→ Adapter ←→ External Tool
-             ↑
-        Bidirectional sync of:
-        - Attention scores
-        - Learned associations
-        - Observation storage
+Status: Experimental - API may change. Not covered by stability guarantees.
 """
 
 import json

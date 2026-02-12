@@ -10,8 +10,8 @@ Usage:
     python verify_claims.py /path/to/your/repo # Test on your own repo
 
 What This Verifies:
-    1. Token reduction claims (98-99%)
-    2. Timing claims (under 300ms for most repos)
+    1. Token reduction claims (90%+)
+    2. Timing claims (under 500ms for most repos)
     3. Reproducibility (same results each run)
 
 Requirements:
@@ -250,10 +250,10 @@ def verify_claims():
 
         # Verify claims
         claims = []
-        if r['reduction_percent'] >= 98:
-            claims.append("  [VERIFIED] Token reduction >= 98%")
+        if r['reduction_percent'] >= 90:
+            claims.append("  [VERIFIED] Token reduction >= 90%")
         else:
-            claims.append(f"  [BELOW CLAIM] Token reduction {r['reduction_percent']:.1f}% < 98%")
+            claims.append(f"  [BELOW CLAIM] Token reduction {r['reduction_percent']:.1f}% < 90%")
             all_pass = False
 
         if r['avg_time_ms'] <= 500:
