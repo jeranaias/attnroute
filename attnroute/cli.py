@@ -224,7 +224,7 @@ def cmd_version(args):
         from attnroute import __version__
         print(f"attnroute version {__version__}")
     except ImportError:
-        print("attnroute version 0.5.0")
+        print("attnroute version (unknown - import failed)")
 
     # Show feature availability
     print("\nFeature availability:")
@@ -321,6 +321,66 @@ def cmd_ingest(args):
     print(f"  Learner maturity: {learner.maturity}")
 
 
+def cmd_validate(args):
+    """Validate attnroute installation and configuration."""
+    import json
+    from pathlib import Path
+
+    errors = []
+    warnings = []
+
+    print("Validating attnroute installation...")
+    print()
+
+    # Check settings.json exists and has hooks
+    settings_file = Path.home() / ".claude" / "settings.json"
+    if not settings_file.exists():
+        errors.append(f"settings.json not found: {settings_file}")
+    else:
+        try:
+            data = json.loads(settings_file.read_text(encoding='utf-8'))
+            hooks = data.get("hooks", {})
+            if not hooks:
+                warnings.append("No hooks registered in settings.json")
+            else:
+                # Check for attnroute hooks
+                attnroute_hooks = 0
+                for event, groups in hooks.items():
+                    for g in groups:
+                        for h in g.get("hooks", []):
+                            cmd = h.get("command", "") if isinstance(h, dict) else h
+                            if "attnroute" in cmd:
+                                attnroute_hooks += 1
+                if attnroute_hooks == 0:
+                    errors.append("No attnroute hooks found in settings.json")
+                else:
+                    print(f"  Found {attnroute_hooks} attnroute hook(s)")
+        except json.JSONDecodeError:
+            errors.append("settings.json is invalid JSON")
+
+    # Check telemetry directory
+    telemetry_dir = Path.home() / ".claude" / "telemetry"
+    if not telemetry_dir.exists():
+        warnings.append(f"Telemetry directory missing: {telemetry_dir}")
+    else:
+        print(f"  Telemetry directory exists: {telemetry_dir}")
+
+    # Report results
+    print()
+    if errors:
+        print("ERRORS:")
+        for e in errors:
+            print(f"  x {e}")
+    if warnings:
+        print("WARNINGS:")
+        for w in warnings:
+            print(f"  ! {w}")
+    if not errors and not warnings:
+        print("Installation valid")
+
+    return 1 if errors else 0
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -328,7 +388,7 @@ def main():
         description="Attentional context routing for Claude Code - 98-99% token reduction",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
+Commands:
   attnroute init              Initialize for current project
   attnroute status            Check configuration and features
   attnroute report            Show efficiency metrics
@@ -336,6 +396,11 @@ Examples:
   attnroute benchmark         Run performance tests
   attnroute compress stats    Show compression statistics
   attnroute graph stats       Show dependency graph info
+  attnroute history           Show attention history
+  attnroute plugins           Manage plugins
+  attnroute ingest            Bootstrap learner from Claude Code history
+  attnroute version           Show version information
+  attnroute validate          Validate installation and configuration
 
 For more information, visit: https://github.com/jeranaias/attnroute
         """
@@ -407,6 +472,9 @@ For more information, visit: https://github.com/jeranaias/attnroute
     ingest_parser.add_argument("--project", type=str, default=None,
                                help="Filter to specific project (substring match)")
 
+    # validate command
+    subparsers.add_parser("validate", help="Validate installation and configuration")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -426,12 +494,15 @@ For more information, visit: https://github.com/jeranaias/attnroute
         "diagnostic": cmd_diagnostic,
         "plugins": cmd_plugins,
         "ingest": cmd_ingest,
+        "validate": cmd_validate,
     }
 
     handler = commands.get(args.command)
     if handler:
         try:
-            handler(args)
+            result = handler(args)
+            if result is not None and isinstance(result, int):
+                sys.exit(result)
         except KeyboardInterrupt:
             print("\nAborted.")
             sys.exit(1)

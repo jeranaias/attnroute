@@ -53,8 +53,10 @@ def normalize_path(path: str) -> str:
     # Common path prefixes to strip (covers Windows/Unix variations)
     prefixes = [
         home + "/",
-        "/c" + home[2:] + "/",  # Git Bash style: /c/Users/...
     ]
+    # Add Git Bash style prefix with dynamic drive letter
+    if len(home) >= 2 and home[1] == ":":
+        prefixes.append(f"/{home[0].lower()}{home[2:]}/")  # /c/Users/... or /d/Users/...
     for prefix in prefixes:
         if path.lower().startswith(prefix.lower()):
             path = path[len(prefix):]
@@ -69,8 +71,19 @@ def get_project_prefix(path: str) -> str:
 
 def extract_file_mentions(prompt: str) -> set[str]:
     mentions = set()
-    for match in re.findall(r'[A-Za-z]:[\\\/][^\s<>"|*?\n]+', prompt):
+    # Match quoted paths (handles spaces)
+    for match in re.findall(r'"([A-Za-z]:[\\\/][^"]+)"', prompt):
         mentions.add(normalize_path(match))
+    # Match unquoted paths - stop at common file extensions to handle spaces better
+    for match in re.findall(r'[A-Za-z]:[\\\/][^\s<>"|*?\n]*\.(?:py|js|ts|tsx|jsx|go|rs|java|md|json|html|css|yaml|yml|toml|dart|c|cpp|h)\b', prompt, re.IGNORECASE):
+        mentions.add(normalize_path(match))
+    # Fallback: match paths without extensions (stop at whitespace)
+    for match in re.findall(r'[A-Za-z]:[\\\/][^\s<>"|*?\n]+', prompt):
+        # Only add if not already captured by extension-based matching
+        normalized = normalize_path(match)
+        if normalized not in mentions:
+            mentions.add(normalized)
+    # Match filename patterns (without full path)
     for match in re.findall(r'\b([\w.-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|md|json|html|css|yaml|yml|toml|dart|c|cpp|h))\b', prompt, re.IGNORECASE):
         mentions.add(match.lower())
     return mentions

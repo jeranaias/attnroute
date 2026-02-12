@@ -223,6 +223,19 @@ class BurnRatePlugin(AttnroutePlugin):
             first = samples[0]
             last = samples[-1]
 
+            # Detect quota reset: session_tokens decreased between any consecutive samples
+            # Always scan for decreases, not just when last < first (handles case where
+            # reset happened mid-session but usage grew past original first sample)
+            for i in range(len(samples) - 1, 0, -1):
+                if samples[i]["session_tokens"] < samples[i - 1]["session_tokens"]:
+                    # Quota reset detected - use only samples after the reset
+                    samples = samples[i:]
+                    if len(samples) < 2:
+                        return None  # Not enough samples after reset
+                    first = samples[0]
+                    last = samples[-1]
+                    break
+
             first_time = datetime.fromisoformat(first["timestamp"])
             last_time = datetime.fromisoformat(last["timestamp"])
 

@@ -283,60 +283,62 @@ class SearchIndex:
                     continue
 
         # Index code files with outlines
+        # Single directory traversal (instead of one rglob per extension)
         for code_root in code_roots:
             if not code_root.exists():
                 continue
 
-            # Iterate over supported source extensions
-            for ext in SOURCE_EXTENSIONS:
-                pattern = f"*{ext}"
-                for code_file in code_root.rglob(pattern):
-                    # Skip hidden files
-                    if code_file.name.startswith("."):
-                        continue
+            for code_file in code_root.rglob("*"):
+                # Only process files with supported extensions
+                if not code_file.is_file() or code_file.suffix not in SOURCE_EXTENSIONS:
+                    continue
 
-                    # Skip excluded directories
-                    if self._should_skip_path(code_file):
-                        continue
+                # Skip hidden files
+                if code_file.name.startswith("."):
+                    continue
 
-                    # Skip large files (generated code, minified bundles, etc.)
-                    try:
-                        file_size = code_file.stat().st_size
-                        if file_size > SOURCE_MAX_FILE_SIZE:
+                # Skip excluded directories
+                if self._should_skip_path(code_file):
+                    continue
+
+                # Skip large files (generated code, minified bundles, etc.)
+                try:
+                    file_size = code_file.stat().st_size
+                    if file_size > SOURCE_MAX_FILE_SIZE:
+                        continue
+                except Exception:
+                    continue
+
+                try:
+                    rel_path = str(code_file.relative_to(code_root))
+
+                    # Try to get outline if available
+                    outline = ""
+                    if OUTLINER_AVAILABLE:
+                        try:
+                            outline = extract_outline(code_file) or ""
+                        except Exception:
+                            pass
+
+                    # If no outline, use first portion of content for indexing
+                    if not outline:
+                        try:
+                            content = code_file.read_text(encoding="utf-8", errors="replace")
+                            # Use first 2000 chars for search indexing
+                            outline = content[:2000]
+                        except Exception:
                             continue
-                    except Exception:
-                        continue
 
-                    try:
-                        rel_path = str(code_file.relative_to(code_root))
-
-                        # Try to get outline if available
-                        outline = ""
-                        if OUTLINER_AVAILABLE:
-                            try:
-                                outline = extract_outline(code_file) or ""
-                            except Exception:
-                                pass
-
-                        # If no outline, use first portion of content for indexing
-                        if not outline:
-                            try:
-                                content = code_file.read_text(encoding="utf-8", errors="replace")
-                                # Use first 2000 chars for search indexing
-                                outline = content[:2000]
-                            except Exception:
-                                continue
-
-                        if outline:
-                            documents.append({
-                                "path": rel_path,
-                                "content": outline,
-                                "outline": outline,
-                                "mtime": code_file.stat().st_mtime,
-                                "doc_type": "code"
-                            })
-                    except Exception:
-                        continue
+                    if outline:
+                        documents.append({
+                            "path": rel_path,
+                            "content": outline,
+                            "outline": outline,
+                            "mtime": code_file.stat().st_mtime,
+                            "doc_type": "code"
+                        })
+                except Exception:
+                    continue
 
         # Store in SQLite
         with sqlite3.connect(self.db_path) as conn:
@@ -386,47 +388,50 @@ class SearchIndex:
                         continue
 
             # Check source files
+            # Single directory traversal (instead of one rglob per extension)
             for code_root in code_roots:
                 if not code_root.exists():
                     continue
 
-                for ext in SOURCE_EXTENSIONS:
-                    pattern = f"*{ext}"
-                    for code_file in code_root.rglob(pattern):
-                        if code_file.name.startswith("."):
+                for code_file in code_root.rglob("*"):
+                    # Only process files with supported extensions
+                    if not code_file.is_file() or code_file.suffix not in SOURCE_EXTENSIONS:
+                        continue
+
+                    if code_file.name.startswith("."):
+                        continue
+                    if self._should_skip_path(code_file):
+                        continue
+
+                    try:
+                        file_size = code_file.stat().st_size
+                        if file_size > SOURCE_MAX_FILE_SIZE:
                             continue
-                        if self._should_skip_path(code_file):
-                            continue
 
-                        try:
-                            file_size = code_file.stat().st_size
-                            if file_size > SOURCE_MAX_FILE_SIZE:
-                                continue
+                        rel_path = str(code_file.relative_to(code_root))
+                        current_mtime = code_file.stat().st_mtime
 
-                            rel_path = str(code_file.relative_to(code_root))
-                            current_mtime = code_file.stat().st_mtime
+                        if rel_path not in existing or existing[rel_path] < current_mtime:
+                            # Get outline or content
+                            outline = ""
+                            if OUTLINER_AVAILABLE:
+                                try:
+                                    outline = extract_outline(code_file) or ""
+                                except Exception:
+                                    pass
 
-                            if rel_path not in existing or existing[rel_path] < current_mtime:
-                                # Get outline or content
-                                outline = ""
-                                if OUTLINER_AVAILABLE:
-                                    try:
-                                        outline = extract_outline(code_file) or ""
-                                    except Exception:
-                                        pass
+                            if not outline:
+                                content = code_file.read_text(encoding="utf-8", errors="replace")
+                                outline = content[:2000]
 
-                                if not outline:
-                                    content = code_file.read_text(encoding="utf-8", errors="replace")
-                                    outline = content[:2000]
-
-                                if outline:
-                                    conn.execute("""
-                                        INSERT OR REPLACE INTO documents (path, content, outline, mtime, doc_type, indexed_at)
-                                        VALUES (?, ?, ?, ?, ?, ?)
-                                    """, (rel_path, outline, outline, current_mtime, "code", datetime.now().isoformat()))
-                                    updated += 1
-                        except Exception:
-                            continue
+                            if outline:
+                                conn.execute("""
+                                    INSERT OR REPLACE INTO documents (path, content, outline, mtime, doc_type, indexed_at)
+                                    VALUES (?, ?, ?, ?, ?, ?)
+                                """, (rel_path, outline, outline, current_mtime, "code", datetime.now().isoformat()))
+                                updated += 1
+                    except Exception:
+                        continue
 
             conn.commit()
 
@@ -536,25 +541,23 @@ class SearchIndex:
 
             # Embed query and documents
             query_emb = model.encode([query])[0]
-            doc_embs = []
-            valid_paths = []
-            for p in paths:
-                if p in path_to_content:
-                    doc_embs.append(model.encode([path_to_content[p][:2000]])[0])
-                    valid_paths.append(p)
 
-            if not doc_embs:
+            # Batch encode all documents at once (instead of one at a time)
+            valid_paths = [p for p in paths if p in path_to_content]
+            if not valid_paths:
                 return candidates[:top_k]
 
-            doc_embs = np.array(doc_embs)
+            docs_to_encode = [path_to_content[p][:2000] for p in valid_paths]
+            doc_embs = model.encode(docs_to_encode)  # Single batch operation
 
             # Cosine similarity
             query_norm = query_emb / (np.linalg.norm(query_emb) + 1e-8)
             doc_norms = doc_embs / (np.linalg.norm(doc_embs, axis=1, keepdims=True) + 1e-8)
             similarities = np.dot(doc_norms, query_norm)
 
-            # Normalize BM25 scores
-            bm25_max = max(bm25_scores.values()) or 1.0
+            # Normalize BM25 scores (guard against empty dict AND all-zero scores)
+            bm25_max = max(bm25_scores.values()) if bm25_scores else 1.0
+            bm25_max = bm25_max if bm25_max > 0 else 1.0
             norm_bm25 = {p: s / bm25_max for p, s in bm25_scores.items()}
 
             # Combine scores: 0.6 * bm25 + 0.4 * semantic

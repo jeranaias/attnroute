@@ -207,6 +207,10 @@ _coactivation_graph = None
 # DOCS ROOT RESOLUTION
 # ============================================================================
 
+# Cache for resolve_docs_root() to avoid repeated glob operations
+_docs_root_cache: Path | None = None
+_docs_root_checked: bool = False
+
 def resolve_docs_root() -> Path:
     """
     Resolve documentation root with correct priority order.
@@ -218,58 +222,77 @@ def resolve_docs_root() -> Path:
 
     Returns: Path to docs root
     Raises: FileNotFoundError if no valid docs directory found
+
+    Note: Results are cached at module level to avoid repeated glob operations.
     """
+    global _docs_root_cache, _docs_root_checked
+
+    # Return cached result if already resolved
+    if _docs_root_checked:
+        if _docs_root_cache is None:
+            raise FileNotFoundError("No .claude/ directory with documentation found (cached)")
+        return _docs_root_cache
+
+    result = None
+
     # Priority 1: Explicit environment variable
     if env_root := os.getenv('CONTEXT_DOCS_ROOT'):
         env_path = Path(env_root).expanduser().resolve()
         if env_path.is_dir():
             print(f"[attnroute] Using CONTEXT_DOCS_ROOT: {env_path}", file=sys.stderr)
-            return env_path
-        else:
-            print(f"[attnroute] WARN:CONTEXT_DOCS_ROOT set but not found: {env_path}", file=sys.stderr)
+            result = env_path
 
     # Priority 2: Project-local .claude/ (more explicit check)
-    project_claude = Path.cwd() / ".claude"
-    if project_claude.is_dir():
-        # Check if it has any .md files (not just exists)
-        md_files = list(project_claude.glob("**/*.md"))
-        if md_files:
-            print(f"[attnroute] Using project-local .claude: {project_claude}", file=sys.stderr)
-            print(f"  Found {len(md_files)} .md files", file=sys.stderr)
-            return project_claude
-        else:
-            print(f"[attnroute] WARN:Project .claude/ exists but has no .md files: {project_claude}", file=sys.stderr)
+    if result is None:
+        project_claude = Path.cwd() / ".claude"
+        if project_claude.is_dir():
+            # Check if it has any .md files (not just exists)
+            md_files = list(project_claude.glob("**/*.md"))
+            if md_files:
+                print(f"[attnroute] Using project-local .claude: {project_claude}", file=sys.stderr)
+                print(f"  Found {len(md_files)} .md files", file=sys.stderr)
+                result = project_claude
+            else:
+                print(f"[attnroute] WARN:Project .claude/ exists but has no .md files: {project_claude}", file=sys.stderr)
 
     # Priority 3: Global ~/.claude/ (last resort)
-    global_claude = Path.home() / ".claude"
-    if global_claude.is_dir():
-        md_files = list(global_claude.glob("**/*.md"))
-        if md_files:
-            print(f"[attnroute] Using global ~/.claude: {global_claude}", file=sys.stderr)
-            print(f"  Found {len(md_files)} .md files", file=sys.stderr)
-            return global_claude
-        else:
-            print("[attnroute] WARN:Global ~/.claude/ exists but has no .md files", file=sys.stderr)
+    if result is None:
+        global_claude = Path.home() / ".claude"
+        if global_claude.is_dir():
+            md_files = list(global_claude.glob("**/*.md"))
+            if md_files:
+                print(f"[attnroute] Using global ~/.claude: {global_claude}", file=sys.stderr)
+                print(f"  Found {len(md_files)} .md files", file=sys.stderr)
+                result = global_claude
+            else:
+                print("[attnroute] WARN:Global ~/.claude/ exists but has no .md files", file=sys.stderr)
+
+    # Cache the result (even if None)
+    _docs_root_checked = True
+    _docs_root_cache = result
 
     # Priority 4: Fail with helpful error
-    raise FileNotFoundError(
-        "\n"
-        "─────────────────────────────────────────────────────────\n"
-        "  No .claude/ directory with documentation found.\n"
-        "\n"
-        "  Create .claude/ in your project root and add .md files:\n"
-        "    mkdir -p .claude/\n"
-        "    echo '# My Project' > .claude/README.md\n"
-        "\n"
-        "  Or set explicit path:\n"
-        "    export CONTEXT_DOCS_ROOT=/path/to/docs\n"
-        "\n"
-        "  Priority order:\n"
-        "    1. CONTEXT_DOCS_ROOT environment variable\n"
-        "    2. Project-local .claude/ (current directory)\n"
-        "    3. Global ~/.claude/ (home directory)\n"
-        "─────────────────────────────────────────────────────────\n"
-    )
+    if result is None:
+        raise FileNotFoundError(
+            "\n"
+            "─────────────────────────────────────────────────────────\n"
+            "  No .claude/ directory with documentation found.\n"
+            "\n"
+            "  Create .claude/ in your project root and add .md files:\n"
+            "    mkdir -p .claude/\n"
+            "    echo '# My Project' > .claude/README.md\n"
+            "\n"
+            "  Or set explicit path:\n"
+            "    export CONTEXT_DOCS_ROOT=/path/to/docs\n"
+            "\n"
+            "  Priority order:\n"
+            "    1. CONTEXT_DOCS_ROOT environment variable\n"
+            "    2. Project-local .claude/ (current directory)\n"
+            "    3. Global ~/.claude/ (home directory)\n"
+            "─────────────────────────────────────────────────────────\n"
+        )
+
+    return result
 
 # ============================================================================
 # CONFIGURATION
@@ -387,7 +410,12 @@ def _is_source_file(path: str) -> bool:
 
 def _is_doc_file(path: str, docs_root: Path = None) -> bool:
     """Check if a path is a documentation file (under .claude/)."""
-    return path.endswith(".md") or ".claude" in path
+    if path.endswith(".md"):
+        return True
+    # Check if .claude is actually a directory component, not just a substring
+    # Handles both Unix (/) and Windows (\) path separators
+    normalized = path.replace("\\", "/")
+    return "/.claude/" in normalized or normalized.startswith(".claude/")
 
 
 def _evict_lowest_source(state: dict, new_path: str, new_score: float) -> None:
@@ -646,9 +674,11 @@ def get_decay_rate(file_path: str) -> float:
     """Get decay rate for a file. Prefers learned rhythm, then category, then default."""
     # Priority 1: Learned per-file rhythm from the intelligence engine
     if LEARNER_AVAILABLE:
-        learned = get_learner().get_file_decay(file_path)
-        if learned is not None:
-            return learned
+        learner = get_learner()
+        if learner is not None:
+            learned = learner.get_file_decay(file_path)
+            if learned is not None:
+                return learned
 
     # Priority 2: Category-based decay from config
     for prefix, rate in DECAY_RATES.items():
@@ -748,7 +778,9 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
 
     # Phase 2.5: Learned association boost (from intelligence engine)
     if LEARNER_AVAILABLE:
-        state["scores"] = get_learner().boost_scores(prompt, state["scores"])
+        learner = get_learner()
+        if learner is not None:
+            state["scores"] = learner.boost_scores(prompt, state["scores"])
 
     # Phase 3: Co-activation boost (direct neighbors)
     for activated_path in directly_activated:
@@ -1115,11 +1147,11 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
                 stats["hot"] += 1
                 first_hot = False
             elif content:
+                # File pushed to repomap, not injected as hot - don't increment stats["hot"]
                 hot_files_for_repomap.append(file_path)
-                stats["hot"] += 1
         else:
+            # File pushed to repomap, not injected as hot - don't increment stats["hot"]
             hot_files_for_repomap.append(file_path)
-            stats["hot"] += 1
 
     # Generate repo map for additional hot doc files
     if mapper and hot_files_for_repomap:
@@ -1439,7 +1471,11 @@ def main():
     raw_input = sys.stdin.read() if sys.stdin else ""
     try:
         input_data = json.loads(raw_input)
-        prompt = input_data.get("prompt", "")
+        if not isinstance(input_data, dict):
+            # Valid JSON but not a dict - treat as prompt
+            prompt = raw_input
+        else:
+            prompt = input_data.get("prompt", "")
     except (json.JSONDecodeError, ValueError):
         # Fallback: treat entire stdin as prompt
         prompt = raw_input
@@ -1511,10 +1547,12 @@ def main():
     # Compact debug log (one-liner per turn, with size rotation)
     log_file = Path.home() / ".claude" / "context_injection.log"
     try:
-        # Rotate log when it exceeds max size
+        # Rotate log when it exceeds max size (using seek for efficiency)
         if log_file.exists() and log_file.stat().st_size > LOG_MAX_SIZE_BYTES:
-            content = log_file.read_text(encoding='utf-8', errors='replace')
-            log_file.write_text(content[-LOG_KEEP_SIZE_BYTES:], encoding='utf-8')
+            with open(log_file, 'rb') as f:
+                f.seek(-LOG_KEEP_SIZE_BYTES, 2)  # Seek from end
+                content = f.read()
+            log_file.write_bytes(content)
 
         with open(log_file, "a", encoding='utf-8') as f:
             f.write(f"[{datetime.now().isoformat()[:19]}] T{state['turn_count']} "

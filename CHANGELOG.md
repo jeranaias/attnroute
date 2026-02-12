@@ -5,6 +5,30 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.11] - 2026-02-11
+
+### Fixed
+- **Critical**: Null learner guards added to prevent `AttributeError` crashes when learner fails to initialize
+- **Critical**: BM25 division by zero fix now guards against both empty dict AND all-zero scores
+- **Critical**: JSON input type validation - non-dict JSON no longer crashes with `AttributeError`
+- **Performance**: Single directory traversal in indexer (10-50x faster for large codebases)
+- **Performance**: Batch embedding encoding (5-10x faster semantic search)
+- **Performance**: Cached `resolve_docs_root()` - no longer globs on every prompt
+- **Performance**: Log rotation now uses seek from end instead of reading entire file
+- **Plugins**: Thread-safe plugin registry with `threading.Lock()`
+- **Plugins**: Atomic state file writes (temp file + rename pattern)
+- **Plugins**: BurnRate quota reset detection improved
+- **Plugins**: Error logging added for plugin load failures (no more silent exceptions)
+- **CLI**: Added `attnroute validate` command to verify installation
+- **CLI**: Exit codes now properly propagated from commands
+- **CLI**: Help text expanded to list all 12 commands
+- **UX**: Progress feedback during project scanning
+- **UX**: Python detection now warns when falling back to `python3`
+- Doc file detection fixed - no longer matches `my.claude.txt` as a doc file
+- Stats inflation fixed - HOT count only increments when file actually injected
+- Git Bash path prefix now uses dynamic drive letter (not hardcoded `/c`)
+- Bare `except:` clauses replaced with `except Exception:` for proper error handling
+
 ## [0.5.10] - 2026-02-11
 
 ### Fixed
@@ -189,6 +213,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `attnroute init` and `attnroute status` commands
 - Zero required dependencies
 
+[0.5.11]: https://github.com/jeranaias/attnroute/compare/v0.5.10...v0.5.11
 [0.5.10]: https://github.com/jeranaias/attnroute/compare/v0.5.9...v0.5.10
 [0.5.9]: https://github.com/jeranaias/attnroute/compare/v0.5.8...v0.5.9
 [0.5.8]: https://github.com/jeranaias/attnroute/compare/v0.5.7...v0.5.8

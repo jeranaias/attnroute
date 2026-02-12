@@ -131,6 +131,7 @@ def detect_python_command() -> str:
                 return cmd
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             continue
+    print("  WARN: Could not detect Python, using 'python3' fallback", file=sys.stderr)
     return "python3"  # Best guess fallback
 
 
@@ -261,13 +262,15 @@ def scan_projects() -> list:
     projects = []
     seen = set()
 
+    print("  Scanning for projects...", end="", flush=True)
+
     def add_if_project(path: Path, is_cwd: bool = False):
         """Check if path has .claude/ and add to results."""
         try:
             resolved = str(path.resolve())
         except (OSError, ValueError) as e:
             if is_cwd:
-                print(f"  WARN: Could not resolve CWD: {e}")
+                print(f"\n  WARN: Could not resolve CWD: {e}", end="", flush=True)
             return
         if resolved in seen:
             return
@@ -282,14 +285,15 @@ def scan_projects() -> list:
                     "has_keywords": (claude_dir / "keywords.json").exists(),
                     "has_md": any(claude_dir.glob("**/*.md")),
                 })
+                print(".", end="", flush=True)
             elif is_cwd:
                 # .claude exists but is a file, not directory - warn user
-                print(f"  WARN: {claude_dir} exists but is a file, not a directory")
+                print(f"\n  WARN: {claude_dir} exists but is a file, not a directory", end="", flush=True)
         elif is_cwd:
             # For CWD, check if there's a case-sensitivity issue
             parent_contents = [p.name for p in path.iterdir() if p.name.lower() == ".claude"]
             if parent_contents:
-                print(f"  WARN: Found '{parent_contents[0]}' but expected '.claude' (case mismatch?)")
+                print(f"\n  WARN: Found '{parent_contents[0]}' but expected '.claude' (case mismatch?)", end="", flush=True)
 
     # 1. Always check CWD first
     add_if_project(Path.cwd(), is_cwd=True)
@@ -327,6 +331,8 @@ def scan_projects() -> list:
                             add_if_project(item)
                 except PermissionError:
                     continue
+
+    print(f" found {len(projects)}")
 
     return projects
 

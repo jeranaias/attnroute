@@ -7,6 +7,8 @@ Plugins are discovered via:
 3. Built-in plugins (verifyfirst)
 """
 import json
+import sys
+import threading
 from pathlib import Path
 
 from attnroute.plugins.base import AttnroutePlugin
@@ -14,13 +16,21 @@ from attnroute.plugins.base import AttnroutePlugin
 # Global plugin registry
 _plugins: dict[str, AttnroutePlugin] = {}
 _discovered: bool = False
+_lock = threading.Lock()
 
 
 def discover_plugins() -> None:
     """Discover and register all available plugins."""
     global _discovered
-    if _discovered:
-        return
+    with _lock:
+        if _discovered:
+            return
+        _discover_plugins_unlocked()
+        _discovered = True
+
+
+def _discover_plugins_unlocked() -> None:
+    """Internal discovery logic (must be called with _lock held)."""
 
     # Method 1: Entry points (pip installed plugins)
     try:
@@ -30,54 +40,66 @@ def discover_plugins() -> None:
         for ep in eps:
             try:
                 plugin_class = ep.load()
-                register_plugin(plugin_class)
-            except Exception:
-                pass
-    except Exception:
-        pass
+                _register_plugin_unlocked(plugin_class)
+            except Exception as e:
+                print(f"[attnroute] Plugin load failed for {ep.name}: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"[attnroute] Entry point discovery failed: {e}", file=sys.stderr)
 
     # Method 2: Built-in plugins
     try:
         from attnroute.plugins.verifyfirst import VerifyFirstPlugin
-        register_plugin(VerifyFirstPlugin)
+        _register_plugin_unlocked(VerifyFirstPlugin)
     except ImportError:
         pass
 
     try:
         from attnroute.plugins.loopbreaker import LoopBreakerPlugin
-        register_plugin(LoopBreakerPlugin)
+        _register_plugin_unlocked(LoopBreakerPlugin)
     except ImportError:
         pass
 
     try:
         from attnroute.plugins.burnrate import BurnRatePlugin
-        register_plugin(BurnRatePlugin)
+        _register_plugin_unlocked(BurnRatePlugin)
     except ImportError:
         pass
 
-    _discovered = True
 
-
-def register_plugin(plugin_class: type[AttnroutePlugin]) -> None:
-    """Register a plugin class."""
+def _register_plugin_unlocked(plugin_class: type[AttnroutePlugin]) -> None:
+    """Register a plugin class (must be called with _lock held)."""
     try:
         instance = plugin_class()
         if instance.is_enabled():
             _plugins[instance.name] = instance
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[attnroute] Plugin registration failed for {plugin_class.__name__}: {e}", file=sys.stderr)
+
+
+def register_plugin(plugin_class: type[AttnroutePlugin]) -> None:
+    """Register a plugin class."""
+    with _lock:
+        _register_plugin_unlocked(plugin_class)
 
 
 def get_plugins() -> list[AttnroutePlugin]:
     """Get all registered and enabled plugins."""
-    discover_plugins()
-    return list(_plugins.values())
+    global _discovered
+    with _lock:
+        if not _discovered:
+            _discover_plugins_unlocked()
+            _discovered = True
+        return list(_plugins.values())
 
 
 def get_plugin(name: str) -> AttnroutePlugin | None:
     """Get a specific plugin by name."""
-    discover_plugins()
-    return _plugins.get(name)
+    global _discovered
+    with _lock:
+        if not _discovered:
+            _discover_plugins_unlocked()
+            _discovered = True
+        return _plugins.get(name)
 
 
 def enable_plugin(name: str) -> bool:
@@ -92,6 +114,7 @@ def disable_plugin(name: str) -> bool:
 
 def _set_plugin_enabled(name: str, enabled: bool) -> bool:
     """Set plugin enabled state in config."""
+    global _discovered, _plugins
     config_file = Path.home() / ".claude" / "plugins" / "config.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -99,8 +122,8 @@ def _set_plugin_enabled(name: str, enabled: bool) -> bool:
     if config_file.exists():
         try:
             config = json.loads(config_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[attnroute] Config parse failed, using defaults: {e}", file=sys.stderr)
 
     if "enabled" not in config:
         config["enabled"] = {}
@@ -109,10 +132,11 @@ def _set_plugin_enabled(name: str, enabled: bool) -> bool:
     config_file.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     # Re-discover to apply changes
-    global _discovered, _plugins
-    _discovered = False
-    _plugins = {}
-    discover_plugins()
+    with _lock:
+        _discovered = False
+        _plugins = {}
+        _discover_plugins_unlocked()
+        _discovered = True
 
     return True
 

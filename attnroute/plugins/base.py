@@ -1,5 +1,7 @@
 """Base class for attnroute plugins."""
 import json
+import os
+import tempfile
 from abc import ABC
 from pathlib import Path
 
@@ -39,11 +41,18 @@ class AttnroutePlugin(ABC):
         return {}
 
     def save_state(self, state: dict) -> None:
-        """Save plugin-specific state to disk."""
-        self._state_file.write_text(
-            json.dumps(state, indent=2, default=str),
-            encoding="utf-8"
-        )
+        """Save plugin-specific state to disk using atomic write."""
+        temp_fd, temp_path = tempfile.mkstemp(dir=self._state_dir, suffix='.tmp')
+        try:
+            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2, default=str)
+            Path(temp_path).replace(self._state_file)  # Atomic rename
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            raise
 
     # Lifecycle hooks (override as needed)
 
