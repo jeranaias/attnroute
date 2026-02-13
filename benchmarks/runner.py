@@ -3,9 +3,10 @@
 attnroute benchmark runner - CLI entry point for benchmarks.
 
 Usage:
-    attnroute benchmark                    # Quick benchmark on current directory
-    attnroute benchmark --scenario all     # Full benchmark suite
-    attnroute benchmark --output results.json  # Save results to file
+    attnroute benchmark                          # Quick claim verification
+    attnroute benchmark --scenario pipeline      # Full pipeline benchmark
+    attnroute benchmark --scenario all           # Everything (statistical + pipeline)
+    attnroute benchmark --scenario quick         # Fast claim verification (default)
 """
 
 import argparse
@@ -13,45 +14,67 @@ import sys
 from pathlib import Path
 
 
-def main(scenario: str = None, output_file: str = None):
+def main(scenario: str = None, repo_path: str = None):
     """Main benchmark entry point."""
-    # Import verify_claims from same directory
     benchmark_dir = Path(__file__).parent
-    sys.path.insert(0, str(benchmark_dir.parent))  # Add attnroute to path
-    sys.path.insert(0, str(benchmark_dir))  # Add benchmarks to path
+    sys.path.insert(0, str(benchmark_dir.parent))
+    sys.path.insert(0, str(benchmark_dir))
 
-    if scenario == "all":
-        # Run full bulletproof benchmark
+    if scenario == "pipeline":
+        from pipeline_benchmark import main as pipeline_main
+        # Override sys.argv for the pipeline benchmark's argparse
+        old_argv = sys.argv
+        sys.argv = ["pipeline_benchmark.py"]
+        if repo_path:
+            sys.argv.append(repo_path)
+        try:
+            pipeline_main()
+        finally:
+            sys.argv = old_argv
+
+    elif scenario == "all":
+        # Run statistical benchmark
         try:
             from bulletproof_benchmark import run_bulletproof_benchmark
-            run_bulletproof_benchmark(use_public_repos=False, include_aider=True)
+            local_paths = [repo_path] if repo_path else None
+            run_bulletproof_benchmark(use_public_repos=False, local_paths=local_paths,
+                                      include_aider=True)
         except ImportError as e:
             print(f"Could not import bulletproof_benchmark: {e}")
-            print("Falling back to verify_claims...")
-            from verify_claims import verify_claims
-            verify_claims()
-    elif scenario == "single_file":
-        # Quick single-file test
-        from verify_claims import verify_claims
-        verify_claims()
-    elif scenario == "multi_file":
-        # Multi-file test
-        from verify_claims import verify_claims
-        verify_claims()
-    else:
-        # Default: quick verification
-        from verify_claims import verify_claims
-        verify_claims()
 
-    # Note: output_file parameter accepted but not yet implemented
-    # verify_claims() and run_bulletproof_benchmark() don't support output files yet
+        # Then run pipeline benchmark
+        print("\n" + "=" * 70)
+        print("PIPELINE BENCHMARK")
+        print("=" * 70 + "\n")
+        from pipeline_benchmark import main as pipeline_main
+        old_argv = sys.argv
+        sys.argv = ["pipeline_benchmark.py"]
+        if repo_path:
+            sys.argv.append(repo_path)
+        try:
+            pipeline_main()
+        finally:
+            sys.argv = old_argv
+
+    else:
+        # Default: quick claim verification
+        from verify_claims import verify_claims
+        if repo_path:
+            old_argv = sys.argv
+            sys.argv = ["verify_claims.py", repo_path]
+            try:
+                verify_claims()
+            finally:
+                sys.argv = old_argv
+        else:
+            verify_claims()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run attnroute benchmarks")
-    parser.add_argument("--scenario", choices=["all", "quick", "single_file", "multi_file"],
+    parser.add_argument("--scenario", choices=["all", "quick", "pipeline"],
                         default="quick", help="Benchmark scenario to run")
-    parser.add_argument("--output", type=str, help="Output file for results")
+    parser.add_argument("--repo", type=str, help="Repository path to benchmark")
 
     args = parser.parse_args()
-    main(scenario=args.scenario, output_file=args.output)
+    main(scenario=args.scenario, repo_path=args.repo)

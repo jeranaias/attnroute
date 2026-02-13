@@ -5,6 +5,7 @@ Tracks files read during the session and injects policy reminders
 to prevent editing unread files. This addresses GitHub issue #23833
 where Claude implements speculative fixes without verifying root cause.
 """
+import fnmatch
 import json
 import sys
 from datetime import datetime
@@ -28,14 +29,14 @@ class VerifyFirstPlugin(AttnroutePlugin):
     version = "0.1.0"
     description = "Ensures files are read before being edited"
 
-    # Tools that read files
-    READ_TOOLS = {"Read", "read"}
+    # Tools that read/search files (counts as "having seen" the file)
+    READ_TOOLS = {"Read", "read", "Grep", "grep", "Glob", "glob"}
 
     # Tools that modify files
     WRITE_TOOLS = {"Edit", "Write", "edit", "write", "MultiEdit"}
 
-    # Max files to show in policy reminder
-    MAX_DISPLAY_FILES = 30
+    # Only Edit tools require read-before-write (Write creates new files)
+    EDIT_TOOLS = {"Edit", "edit", "MultiEdit"}
 
     def __init__(self):
         super().__init__()
@@ -50,6 +51,7 @@ class VerifyFirstPlugin(AttnroutePlugin):
             "session_id": session_id,
             "session_start": datetime.now().isoformat(),
             "files_read": [],
+            "read_patterns": [],
             "files_written": [],
             "violations": [],
         })
@@ -79,33 +81,25 @@ class VerifyFirstPlugin(AttnroutePlugin):
         state = self.load_state()
         files_read = state.get("files_read", [])
 
-        # Build policy context
+        # Build compact policy context (avoid bloating every prompt)
         policy_lines = [
             "",
             "## VerifyFirst Policy",
-            "You MUST read a file before editing it. This ensures you understand the full context.",
-            ""
+            "You MUST read a file before editing it.",
         ]
 
         if files_read:
-            display_files = files_read[:self.MAX_DISPLAY_FILES]
-            policy_lines.append("**Files verified (safe to edit):**")
-            for f in display_files:
-                # Show just filename for brevity
-                name = Path(f).name if "/" in f or "\\" in f else f
-                policy_lines.append(f"- `{name}`")
-
-            if len(files_read) > self.MAX_DISPLAY_FILES:
-                policy_lines.append(f"- ... and {len(files_read) - self.MAX_DISPLAY_FILES} more")
-
-            policy_lines.append("")
-            policy_lines.append("**IMPORTANT:** For any file NOT in this list, you MUST use Read first.")
+            count = len(files_read)
+            if count <= 5:
+                names = ", ".join(f"`{Path(f).name}`" for f in files_read)
+                policy_lines.append(f"**Verified ({count}):** {names}")
+            else:
+                policy_lines.append(f"**Verified:** {count} files read this session.")
+            policy_lines.append("For any new file, use Read first.")
         else:
-            policy_lines.append("**No files have been read yet this session.**")
-            policy_lines.append("You MUST Read any file before attempting to Edit or Write it.")
+            policy_lines.append("No files read yet. Use Read before Edit.")
 
         policy_lines.append("")
-
         return "\n".join(policy_lines)
 
     def on_stop(self, tool_calls: list[dict], session_state: dict) -> str | None:
@@ -117,6 +111,7 @@ class VerifyFirstPlugin(AttnroutePlugin):
 
         state = self.load_state()
         files_read: set[str] = set(state.get("files_read", []))
+        read_patterns: set[str] = set(state.get("read_patterns", []))
         files_written: set[str] = set(state.get("files_written", []))
         violations: list[dict] = state.get("violations", [])
 
@@ -133,13 +128,20 @@ class VerifyFirstPlugin(AttnroutePlugin):
             target_normalized = self._normalize_path(target)
 
             if tool in self.READ_TOOLS:
-                files_read.add(target_normalized)
+                # If target looks like a glob pattern, store separately
+                if "*" in target or "?" in target:
+                    read_patterns.add(target_normalized)
+                else:
+                    files_read.add(target_normalized)
 
             elif tool in self.WRITE_TOOLS:
                 files_written.add(target_normalized)
 
-                # Check for violation
-                if target_normalized not in files_read:
+                # Only Edit tools require read-before-write
+                # Write tool is used for new file creation and doesn't require prior read
+                if tool in self.EDIT_TOOLS and not self._was_read(
+                    target_normalized, files_read, read_patterns
+                ):
                     violation = {
                         "timestamp": datetime.now().isoformat(),
                         "tool": tool,
@@ -154,6 +156,7 @@ class VerifyFirstPlugin(AttnroutePlugin):
 
         # Update state
         state["files_read"] = list(files_read)
+        state["read_patterns"] = list(read_patterns)
         state["files_written"] = list(files_written)
         state["violations"] = violations
         self.save_state(state)
@@ -165,10 +168,29 @@ class VerifyFirstPlugin(AttnroutePlugin):
 
         return None
 
+    def _was_read(self, path: str, files_read: set, read_patterns: set) -> bool:
+        """Check if a file was explicitly read or matches a read pattern."""
+        if path in files_read:
+            return True
+        # Check against glob patterns from Grep/Glob
+        for pattern in read_patterns:
+            if fnmatch.fnmatch(path, pattern):
+                return True
+            # Also match just the filename against the pattern
+            if fnmatch.fnmatch(Path(path).name, Path(pattern).name):
+                return True
+        return False
+
     def _normalize_path(self, path: str) -> str:
-        """Normalize path for comparison."""
+        """Normalize path for comparison, resolving relative paths."""
+        # Try to resolve to absolute path for consistent comparison
+        try:
+            resolved = str(Path(path).resolve())
+        except (OSError, ValueError):
+            resolved = path
+
         # Convert to forward slashes, lowercase on Windows
-        normalized = path.replace("\\", "/")
+        normalized = resolved.replace("\\", "/")
         if sys.platform == "win32":
             normalized = normalized.lower()
         return normalized

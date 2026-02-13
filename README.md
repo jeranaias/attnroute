@@ -1,6 +1,6 @@
 <h1 align="center">attnroute</h1>
 <h3 align="center">Intelligent Context Routing for Claude Code</h3>
-<p align="center"><strong>90%+ Token Reduction | <500ms Latency | Zero Config Required</strong></p>
+<p align="center"><strong>90%+ Token Reduction | <200ms per prompt | Zero Config Required</strong></p>
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Token_Reduction-90%25+-brightgreen.svg" alt="Token Reduction: 90%+">
-  <img src="https://img.shields.io/badge/Latency-<500ms-blue.svg" alt="Latency: <500ms">
+  <img src="https://img.shields.io/badge/Latency-<200ms_warm-blue.svg" alt="Latency: <200ms warm">
   <img src="https://img.shields.io/badge/Zero_Config-Required-blueviolet.svg" alt="Zero Config">
 </p>
 
@@ -73,7 +73,7 @@ attnroute is a **hook system for [Claude Code](https://github.com/anthropics/cla
 | Metric | Value |
 |--------|-------|
 | **Context Compression** | 99.87% (Go, 556 files), 97.82% (Python, 30 files) |
-| **Latency** | 309ms (556 files), 95ms (30 files) |
+| **Latency** | ~180ms warm per prompt (cold start higher with indexing) |
 | **Context Precision** | HOT files get full content, WARM get symbols only |
 | **Memory Overhead** | <100MB runtime footprint |
 

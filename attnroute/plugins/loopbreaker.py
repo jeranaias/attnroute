@@ -7,7 +7,6 @@ attempts instead of thinking through problems."
 Tracks tool call patterns to detect when Claude is repeating the same
 failing approach, then injects context forcing a different strategy.
 """
-import hashlib
 import json
 import re
 import sys
@@ -23,7 +22,7 @@ class LoopBreakerPlugin(AttnroutePlugin):
 
     Features:
     - Tracks recent tool calls and their outcomes
-    - Detects 3+ similar consecutive attempts on same file
+    - Detects 4+ similar consecutive attempts on same file
     - Injects "stop and reconsider" context when loops detected
     - Provides analytics on loops detected/broken
     """
@@ -33,12 +32,15 @@ class LoopBreakerPlugin(AttnroutePlugin):
     description = "Detects and breaks repetitive failure loops"
 
     # Configuration
-    LOOP_THRESHOLD = 3  # Number of similar attempts before triggering
+    LOOP_THRESHOLD = 4  # Number of similar attempts before triggering
     HISTORY_SIZE = 20   # Number of recent attempts to track
     SIMILARITY_THRESHOLD = 0.7  # How similar attempts must be to count as loop
 
     # Tools that indicate active work (not just reading)
     WORK_TOOLS = {"Edit", "Write", "edit", "write", "MultiEdit", "Bash", "bash"}
+
+    # Test/build commands that are legitimate to run repeatedly
+    TEST_COMMANDS = {"pytest", "test", "jest", "mocha", "vitest", "cargo", "go", "make", "npm", "npx", "yarn", "pnpm"}
 
     def __init__(self):
         super().__init__()
@@ -105,22 +107,28 @@ class LoopBreakerPlugin(AttnroutePlugin):
         recent_attempts: list[dict] = state.get("recent_attempts", [])
 
         if not tool_calls:
-            # No tool calls - clear any active loop (user is doing something else)
+            # No tool calls — don't immediately clear loop.
+            # Only break after 2+ consecutive idle turns (user moved on).
             if state.get("active_loop"):
-                state["active_loop"] = None
-                state["loops_broken"] = state.get("loops_broken", 0) + 1
+                idle = state.get("idle_turns", 0) + 1
+                state["idle_turns"] = idle
+                if idle >= 2:
+                    state["active_loop"] = None
+                    state["idle_turns"] = 0
+                    state["loops_broken"] = state.get("loops_broken", 0) + 1
                 self.save_state(state)
             return None
+
+        # Reset idle counter on any tool call
+        state["idle_turns"] = 0
 
         # Extract work attempts from this turn
         work_attempts = self._extract_work_attempts(tool_calls)
 
         if not work_attempts:
-            # No work tools used (only reads, etc.) - clear any active loop
-            if state.get("active_loop"):
-                state["active_loop"] = None
-                state["loops_broken"] = state.get("loops_broken", 0) + 1
-                self.save_state(state)
+            # No work tools used (only reads, etc.) — keep loop active.
+            # Reading files between edits is normal loop behavior.
+            self.save_state(state)
             return None
 
         # Check if current work is on a different file than active loop
@@ -148,7 +156,6 @@ class LoopBreakerPlugin(AttnroutePlugin):
                 "file": attempt["file"],
                 "tool": attempt["tool"],
                 "signature": attempt["signature"],
-                "content_hash": attempt.get("content_hash", ""),
             })
 
         # Trim to history size
@@ -188,7 +195,11 @@ class LoopBreakerPlugin(AttnroutePlugin):
             return None
 
     def _extract_work_attempts(self, tool_calls: list[dict]) -> list[dict]:
-        """Extract work tool calls with signatures for comparison."""
+        """Extract work tool calls with signatures for comparison.
+
+        Tool calls from telemetry contain only {tool, target} — no
+        old_string, command, or content fields.
+        """
         attempts = []
 
         for tc in tool_calls:
@@ -200,14 +211,27 @@ class LoopBreakerPlugin(AttnroutePlugin):
             if not target:
                 continue
 
-            # Create a signature for this attempt
+            # For Bash, skip test/build commands — running tests repeatedly is legitimate
+            if tool in {"Bash", "bash"}:
+                parts = target.split()
+                base_cmd = parts[0] if parts else ""
+                if base_cmd in self.TEST_COMMANDS:
+                    continue
+
             signature = self._create_signature(tc)
 
+            # For Bash, group by base command for loop detection
+            # (target is the full command text from telemetry)
+            if tool in {"Bash", "bash"}:
+                parts = target.split()
+                file_key = parts[0] if parts else target
+            else:
+                file_key = target
+
             attempts.append({
-                "file": target,
+                "file": file_key,
                 "tool": tool,
                 "signature": signature,
-                "content_hash": self._hash_content(tc.get("content", "")),
             })
 
         return attempts
@@ -216,45 +240,37 @@ class LoopBreakerPlugin(AttnroutePlugin):
         """
         Create a signature that captures the 'shape' of an attempt.
         Similar attempts should have similar signatures.
+
+        Telemetry provides only {tool, target}:
+        - Edit/Write: target = file_path
+        - Bash: target = command text (first 100 chars)
         """
         tool = tool_call.get("tool", "")
         target = tool_call.get("target", "")
 
-        # For Edit/Write: hash the old_string pattern (what we're replacing)
-        old_string = tool_call.get("old_string", "")
-        if old_string:
-            # Extract key identifiers from old_string
-            identifiers = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', old_string)
-            key_ids = sorted(set(identifiers))[:5]  # Top 5 identifiers
-            old_sig = ":".join(key_ids)
+        if tool in {"Bash", "bash"}:
+            # For Bash: target IS the command (first 100 chars from telemetry)
+            parts = target.split()
+            cmd = parts[0] if parts else ""
+            identifiers = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', target)
+            key_ids = sorted(set(identifiers))
+            return f"{tool}|{cmd}|{':'.join(key_ids)}|"
+
+        # For Edit/Write: use normalized file path
+        if sys.platform == "win32":
+            normalized = target.replace("\\", "/").lower()
         else:
-            old_sig = ""
-
-        # For Bash: extract command pattern
-        command = tool_call.get("command", "")
-        if command:
-            # Extract first word (the command) and key flags
-            parts = command.split()
-            cmd_sig = parts[0] if parts else ""
-        else:
-            cmd_sig = ""
-
-        # Use full normalized path to avoid false positives for same-named files in different dirs
-        normalized_target = target.replace("\\", "/").lower() if sys.platform == "win32" else target.replace("\\", "/")
-        return f"{tool}|{normalized_target}|{old_sig}|{cmd_sig}"
-
-    def _hash_content(self, content: str) -> str:
-        """Hash content for quick comparison."""
-        if not content:
-            return ""
-        return hashlib.md5(content.encode()).hexdigest()[:8]
+            normalized = target.replace("\\", "/")
+        return f"{tool}|{normalized}||"
 
     def _signature_similarity(self, sig1: str, sig2: str) -> float:
         """
         Compute similarity between two signatures using Jaccard similarity
         on the identifier components.
 
-        Signature format: "tool|path|identifiers|command"
+        Signature format:
+          Edit/Write: "tool|normalized_path||"
+          Bash:       "tool|command_base|identifiers|"
         """
         parts1 = sig1.split("|")
         parts2 = sig2.split("|")
@@ -262,8 +278,18 @@ class LoopBreakerPlugin(AttnroutePlugin):
         if len(parts1) < 4 or len(parts2) < 4:
             return 1.0 if sig1 == sig2 else 0.0
 
-        # Tool and path must match exactly
-        if parts1[0] != parts2[0] or parts1[1] != parts2[1]:
+        # Tool must match
+        if parts1[0] != parts2[0]:
+            return 0.0
+
+        tool = parts1[0]
+
+        # For Edit/Write: path-only comparison
+        if tool not in {"Bash", "bash"}:
+            return 1.0 if parts1[1] == parts2[1] else 0.0
+
+        # For Bash: command base must match
+        if parts1[1] != parts2[1]:
             return 0.0
 
         # Compare identifiers using Jaccard similarity
@@ -271,8 +297,7 @@ class LoopBreakerPlugin(AttnroutePlugin):
         ids2 = set(parts2[2].split(":")) if parts2[2] else set()
 
         if not ids1 and not ids2:
-            # Both empty identifiers - compare commands
-            return 1.0 if parts1[3] == parts2[3] else 0.0
+            return 1.0  # Same command, no identifiers
 
         if not ids1 or not ids2:
             return 0.0

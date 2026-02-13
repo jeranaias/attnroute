@@ -541,6 +541,13 @@ def main():
     print("─" * 56)
     print("  Ready. Source code routing is active.")
     print("  Hooks activate on next Claude Code session.")
+
+    # Hint about tree-sitter for faster indexing
+    if not deps.get("tree_sitter_languages", {}).get("installed", False):
+        print()
+        print("  Tip: Install tree-sitter-languages for 3-5x faster indexing:")
+        print("    pip install tree-sitter-languages")
+
     print()
 
     # Quick reference
