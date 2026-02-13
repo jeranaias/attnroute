@@ -1471,7 +1471,7 @@ class TestBillingAudit:
             _assistant_entry(minutes_ago=5, request_id="req_001",
                              input_tokens=1_000_000,   # $5.00
                              output_tokens=100_000,    # $2.50
-                             cache_creation=1_000_000,  # $6.25
+                             cache_creation=1_000_000,  # $6.25 (5m default)
                              cache_read=10_000_000,     # $5.00
                              model="claude-opus-4-6"),
         ])
@@ -1481,7 +1481,8 @@ class TestBillingAudit:
 
         assert cost["breakdown"]["input"] == 5.00
         assert cost["breakdown"]["output"] == 2.50
-        assert cost["breakdown"]["cache_creation"] == 6.25
+        assert cost["breakdown"]["cache_creation_5m"] == 6.25
+        assert cost["breakdown"]["cache_creation_1h"] == 0
         assert cost["breakdown"]["cache_read"] == 5.00
         assert cost["total"] == 18.75
 

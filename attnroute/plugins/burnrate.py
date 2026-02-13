@@ -87,33 +87,38 @@ class BurnRatePlugin(AttnroutePlugin):
 
     # Published API pricing per million tokens (USD, as of 2026).
     # Opus 4.5/4.6 have LOWER pricing than Opus 4.0/4.1.
-    # Cache write uses the 5-minute ephemeral tier (Claude Code default).
+    # Cache write has two tiers: 5-minute (1.25x base) and 1-hour (2x base).
+    # Cache reads are 0.1x base regardless of TTL tier.
     # Used for cost estimation — shows users the API-equivalent value
     # of their subscription usage.
     MODEL_PRICING = {
         "opus": {
             "input": 5.00,
             "output": 25.00,
-            "cache_create": 6.25,
+            "cache_create_5m": 6.25,
+            "cache_create_1h": 10.00,
             "cache_read": 0.50,
         },
         "opus_legacy": {
             # Opus 4.0 / 4.1 (higher pricing)
             "input": 15.00,
             "output": 75.00,
-            "cache_create": 18.75,
+            "cache_create_5m": 18.75,
+            "cache_create_1h": 30.00,
             "cache_read": 1.50,
         },
         "sonnet": {
             "input": 3.00,
             "output": 15.00,
-            "cache_create": 3.75,
+            "cache_create_5m": 3.75,
+            "cache_create_1h": 6.00,
             "cache_read": 0.30,
         },
         "haiku": {
             "input": 1.00,
             "output": 5.00,
-            "cache_create": 1.25,
+            "cache_create_5m": 1.25,
+            "cache_create_1h": 2.00,
             "cache_read": 0.10,
         },
     }
@@ -465,15 +470,40 @@ class BurnRatePlugin(AttnroutePlugin):
                     if not usage:
                         continue
 
+                    # Extract cache creation breakdown by TTL tier
+                    # Newer JSONL has: usage.cache_creation.ephemeral_5m/1h
+                    cache_detail = usage.get("cache_creation", {})
+                    if isinstance(cache_detail, dict):
+                        cc_5m = cache_detail.get(
+                            "ephemeral_5m_input_tokens", 0,
+                        )
+                        cc_1h = cache_detail.get(
+                            "ephemeral_1h_input_tokens", 0,
+                        )
+                    else:
+                        # Older format or no breakdown — assume all 5m
+                        cc_5m = usage.get(
+                            "cache_creation_input_tokens", 0,
+                        )
+                        cc_1h = 0
+
+                    # Total cache creation (for backwards compat)
+                    cc_total = usage.get(
+                        "cache_creation_input_tokens", 0,
+                    )
+                    # If breakdown exists but total doesn't, sum them
+                    if cc_total == 0 and (cc_5m or cc_1h):
+                        cc_total = cc_5m + cc_1h
+
                     records.append({
                         "timestamp": ts.isoformat(),
                         "model": message.get("model", "unknown"),
                         "session_id": entry.get("sessionId", "unknown"),
                         "input_tokens": usage.get("input_tokens", 0),
                         "output_tokens": usage.get("output_tokens", 0),
-                        "cache_creation_tokens": usage.get(
-                            "cache_creation_input_tokens", 0,
-                        ),
+                        "cache_creation_tokens": cc_total,
+                        "cache_creation_5m_tokens": cc_5m,
+                        "cache_creation_1h_tokens": cc_1h,
                         "cache_read_tokens": usage.get(
                             "cache_read_input_tokens", 0,
                         ),
@@ -653,11 +683,25 @@ class BurnRatePlugin(AttnroutePlugin):
             family = self._get_model_family(r.get("model", ""))
             pricing = self.MODEL_PRICING.get(family, self.MODEL_PRICING["sonnet"])
 
+            # Use per-tier cache creation rates when breakdown available
+            cc_5m = r.get("cache_creation_5m_tokens", 0)
+            cc_1h = r.get("cache_creation_1h_tokens", 0)
+            if cc_5m or cc_1h:
+                cache_cost = (
+                    cc_5m * pricing["cache_create_5m"] / 1_000_000
+                    + cc_1h * pricing["cache_create_1h"] / 1_000_000
+                )
+            else:
+                # Fallback: all cache creation at 5m rate
+                cache_cost = (
+                    r.get("cache_creation_tokens", 0)
+                    * pricing["cache_create_5m"] / 1_000_000
+                )
+
             cost = (
                 r.get("input_tokens", 0) * pricing["input"] / 1_000_000
                 + r.get("output_tokens", 0) * pricing["output"] / 1_000_000
-                + r.get("cache_creation_tokens", 0)
-                * pricing["cache_create"] / 1_000_000
+                + cache_cost
                 + r.get("cache_read_tokens", 0)
                 * pricing["cache_read"] / 1_000_000
             )
@@ -1349,21 +1393,33 @@ class BurnRatePlugin(AttnroutePlugin):
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_creation_tokens": 0,
+            "cache_creation_5m_tokens": 0,
+            "cache_creation_1h_tokens": 0,
             "cache_read_tokens": 0,
         }
         for r in records:
             totals["input_tokens"] += r.get("input_tokens", 0)
             totals["output_tokens"] += r.get("output_tokens", 0)
             totals["cache_creation_tokens"] += r.get("cache_creation_tokens", 0)
+            totals["cache_creation_5m_tokens"] += r.get(
+                "cache_creation_5m_tokens", 0,
+            )
+            totals["cache_creation_1h_tokens"] += r.get(
+                "cache_creation_1h_tokens", 0,
+            )
             totals["cache_read_tokens"] += r.get("cache_read_tokens", 0)
 
-        all_tokens = sum(totals.values())
+        all_tokens = (
+            totals["input_tokens"] + totals["output_tokens"]
+            + totals["cache_creation_tokens"] + totals["cache_read_tokens"]
+        )
 
-        # Cost at published rates (per-model)
+        # Cost at published rates (per-model, per-cache-tier)
         cost_breakdown = {
             "input": 0.0,
             "output": 0.0,
-            "cache_creation": 0.0,
+            "cache_creation_5m": 0.0,
+            "cache_creation_1h": 0.0,
             "cache_read": 0.0,
         }
         for r in records:
@@ -1375,10 +1431,22 @@ class BurnRatePlugin(AttnroutePlugin):
             cost_breakdown["output"] += (
                 r.get("output_tokens", 0) * pricing["output"] / 1_000_000
             )
-            cost_breakdown["cache_creation"] += (
-                r.get("cache_creation_tokens", 0)
-                * pricing["cache_create"] / 1_000_000
-            )
+            # Use per-tier rates when breakdown is available
+            cc_5m = r.get("cache_creation_5m_tokens", 0)
+            cc_1h = r.get("cache_creation_1h_tokens", 0)
+            if cc_5m or cc_1h:
+                cost_breakdown["cache_creation_5m"] += (
+                    cc_5m * pricing["cache_create_5m"] / 1_000_000
+                )
+                cost_breakdown["cache_creation_1h"] += (
+                    cc_1h * pricing["cache_create_1h"] / 1_000_000
+                )
+            else:
+                # No breakdown — assume all 5m
+                cost_breakdown["cache_creation_5m"] += (
+                    r.get("cache_creation_tokens", 0)
+                    * pricing["cache_create_5m"] / 1_000_000
+                )
             cost_breakdown["cache_read"] += (
                 r.get("cache_read_tokens", 0)
                 * pricing["cache_read"] / 1_000_000
@@ -1397,7 +1465,7 @@ class BurnRatePlugin(AttnroutePlugin):
             primary_family = max(family_counts, key=family_counts.get)
 
         pricing = self.MODEL_PRICING.get(primary_family, self.MODEL_PRICING["sonnet"])
-        flat_rate = pricing["cache_create"]
+        flat_rate = pricing["cache_create_5m"]
         all_input_tokens = (
             totals["input_tokens"]
             + totals["cache_creation_tokens"]
@@ -1492,6 +1560,21 @@ class BurnRatePlugin(AttnroutePlugin):
             count = totals[key]
             pct = count / all_tokens * 100 if all_tokens else 0
             lines.append(f"  {label + ':':<38} {count:>12,}  ({pct:5.2f}%)")
+
+        # Show cache creation tier breakdown if available
+        cc_5m = totals.get("cache_creation_5m_tokens", 0)
+        cc_1h = totals.get("cache_creation_1h_tokens", 0)
+        if cc_5m and cc_1h:
+            cc_total = totals["cache_creation_tokens"] or 1
+            lines.append(
+                f"    {'-> 5-min cache writes:':<36} {cc_5m:>12,}"
+                f"  ({cc_5m / cc_total * 100:5.1f}%)"
+            )
+            lines.append(
+                f"    {'-> 1-hr cache writes:':<36} {cc_1h:>12,}"
+                f"  ({cc_1h / cc_total * 100:5.1f}%)"
+            )
+
         lines.append(f"  {'TOTAL:':<38} {all_tokens:>12,}")
         lines.append("")
 
@@ -1499,6 +1582,10 @@ class BurnRatePlugin(AttnroutePlugin):
         bd = published["breakdown"]
         family = audit.get("primary_family", "sonnet")
         pricing = audit.get("pricing_used", self.MODEL_PRICING["sonnet"])
+        cc_5m_cost = bd.get("cache_creation_5m", 0)
+        cc_1h_cost = bd.get("cache_creation_1h", 0)
+        cc_total_cost = cc_5m_cost + cc_1h_cost
+
         lines.extend([
             f"  COST AT PUBLISHED API RATES ({family})",
             "  " + "\u2500" * 56,
@@ -1506,8 +1593,22 @@ class BurnRatePlugin(AttnroutePlugin):
             f"    ${bd['input']:>10.2f}",
             f"  Output         (${pricing['output']:.2f}/M):"
             f"    ${bd['output']:>10.2f}",
-            f"  Cache creation (${pricing['cache_create']:.2f}/M):"
-            f"    ${bd['cache_creation']:>10.2f}",
+        ])
+
+        if cc_5m_cost and cc_1h_cost:
+            lines.extend([
+                f"  Cache write 5m (${pricing['cache_create_5m']:.2f}/M):"
+                f"    ${cc_5m_cost:>10.2f}",
+                f"  Cache write 1h (${pricing['cache_create_1h']:.2f}/M):"
+                f"    ${cc_1h_cost:>10.2f}",
+            ])
+        else:
+            lines.append(
+                f"  Cache creation (${pricing['cache_create_5m']:.2f}/M):"
+                f"    ${cc_total_cost:>10.2f}"
+            )
+
+        lines.extend([
             f"  Cache read     (${pricing['cache_read']:.2f}/M):"
             f"    ${bd['cache_read']:>10.2f}",
             f"  {'TOTAL:':<38}  ${published['total']:>10.2f}",
