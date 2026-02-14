@@ -1541,7 +1541,7 @@ class BurnRatePlugin(AttnroutePlugin):
             "",
             "\u2550" * 60,
             f"  BILLING AUDIT \u2014 Last {days} Days",
-            f"  Compare this against your Anthropic billing dashboard",
+            "  Compare this against your Anthropic billing dashboard",
             "\u2550" * 60,
             "",
         ]
@@ -1628,7 +1628,7 @@ class BurnRatePlugin(AttnroutePlugin):
         lines.extend([
             "  HOW TO INTERPRET",
             "  " + "\u2500" * 56,
-            f"  Your billing dashboard shows:     $___________",
+            "  Your billing dashboard shows:     $___________",
             f"  Published API rates predict:       ${published['total']:>10.2f}",
             f"  Flat-rate scenario predicts:        ${flat['total']:>10.2f}",
             "",
