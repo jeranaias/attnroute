@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VerifyFirst demo — violation, correction, freshness."""
+"""VerifyFirst demo — the real problem, then the fix."""
 import sys
 if sys.stdout.encoding != "utf-8" and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -12,18 +12,20 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RESET = "\033[0m"
 
-print(f">> update the rate limiting in middleware.py")
-print(f"  Claude calls: {BOLD}Edit(middleware.py){RESET}")
-print(f"  {BOLD}{RED}BLOCKED{RESET} {RED}-- middleware.py was never read{RESET}")
+# The problem: Claude edits from memory, gets it wrong
+print(f">> fix the token refresh bug in auth.py")
 print()
-print(f">> try again")
-print(f"  Claude calls: {BOLD}Read(middleware.py){RESET}")
-print(f"  Claude calls: {BOLD}Edit(middleware.py){RESET}")
-print(f"  {GREEN}{BOLD}ALLOWED{RESET} {GREEN}-- file verified{RESET}")
+print(f"  {DIM}Claude thinks it remembers auth.py...{RESET}")
+print(f"  Edit auth.py:  {RED}wrong function name{RESET}")
+print(f"  Edit auth.py:  {RED}import doesn't exist{RESET}")
+print(f"  Edit auth.py:  {RED}stale variable name{RESET}")
+print(f"  {RED}{BOLD}3 turns wasted. auth.py was refactored 10 turns ago.{RESET}")
 print()
-print(f"  {DIM}Freshness degrades over time:{RESET}")
-print(f"  auth.py        {GREEN}fresh{RESET}     {DIM}read 2 turns ago{RESET}")
-print(f"  session.py     {YELLOW}aging{RESET}     {DIM}read 8 turns ago{RESET}")
-print(f"  config.py      {RED}{BOLD}STALE{RESET}     {DIM}read 15 turns ago -- re-read required{RESET}")
+
+# The fix: VerifyFirst catches it
+print(f"  {DIM}With VerifyFirst:{RESET}")
+print(f"  auth.py  {RED}{BOLD}STALE{RESET}  {DIM}read 12 turns ago{RESET}")
+print(f"  {YELLOW}Re-read before editing.{RESET}")
 print()
-print(f"  {GREEN}{BOLD}Claude reads first. Every time.{RESET}")
+print(f"  Read auth.py  {GREEN}fresh{RESET}")
+print(f"  Edit auth.py  {GREEN}{BOLD}correct on first try{RESET}")
