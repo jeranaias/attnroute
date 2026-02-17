@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""BurnRate demo: real-time tracking + budget alerts + cost breakdown."""
+"""BurnRate demo: Real-time token monitoring in a Claude Code session."""
 import sys
+if sys.stdout.encoding != "utf-8" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
+# ANSI codes
 BOLD = "\033[1m"
 DIM = "\033[2m"
 GREEN = "\033[32m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
 CYAN = "\033[36m"
+MAGENTA = "\033[35m"
 RESET = "\033[0m"
 
 def header(text):
     print(f"\n{BOLD}{CYAN}{text}{RESET}")
-    print(f"{CYAN}{'─' * 50}{RESET}")
+    print(f"{CYAN}{'─' * 56}{RESET}")
 
 def progress_bar(pct, width=20):
-    filled = int(width * pct / 100)
+    filled = int(width * min(pct, 100) / 100)
     bar = "#" * filled + "-" * (width - filled)
     if pct >= 80:
         color = RED
@@ -25,53 +29,71 @@ def progress_bar(pct, width=20):
         color = GREEN
     return f"{color}[{bar}]{RESET} {pct:.0f}%"
 
-# Scene 1: Normal monitoring
-header("Real-time rate limit tracking")
+# ── Scene 1: Normal Session Monitoring ────────────────────────────────────────
 
-print(f"  {BOLD}Plan:{RESET}         Max 20x")
+header("Session start -- BurnRate shows current window")
+
+print(f"{DIM}$ claude{RESET}")
+print(f"  {DIM}attnroute: 4 plugins loaded{RESET}")
+print(f"  BurnRate: Active (max_20x plan, 756,355 / 2,000,000 tokens in 5h window, 38% used)")
+print()
+print(f"{DIM}>> refactor the auth module to use JWT{RESET}")
+print()
+print(f"{DIM}# BurnRate monitors every API call from ~/.claude/projects/*/*.jsonl{RESET}")
+print(f"{DIM}# Status at any time:{RESET}")
+print()
+print(f"  {BOLD}Plan:{RESET}         max_20x (2,000,000 tokens / 5h window)")
 print(f"  {BOLD}Window:{RESET}       756,355 / 2,000,000 tokens")
 print(f"  {BOLD}Usage:{RESET}        {progress_bar(37.8)}")
-print(f"  {BOLD}Burn rate:{RESET}    3,740 tokens/min")
+print(f"  {BOLD}Burn rate:{RESET}    3,740 tokens/min {DIM}(last 15.0min){RESET}")
 print(f"  {BOLD}Remaining:{RESET}    {GREEN}332 minutes{RESET}")
 
-# Scene 2: Budget configuration
-header("Budget alerts")
+# ── Scene 2: Budget Configuration ────────────────────────────────────────────
 
-print(f"{DIM}~/.claude/plugins/config.json:{RESET}")
-print(f'  {DIM}{{"burnrate": {{"daily_budget": 800000, "weekly_budget": 3000000}}}}{RESET}')
+header("Budget alerts -- daily and weekly limits")
+
+print(f"{DIM}# Optional budget config in ~/.claude/plugins/config.json:{RESET}")
+print(f'{DIM}  {{"burnrate": {{"daily_budget": 800000, "weekly_budget": 3000000}}}}{RESET}')
 print()
-print(f"{BOLD}{YELLOW}## BurnRate Budget{RESET}")
-print(f"  Daily:  607,268 / 800,000  {progress_bar(75.9)}")
-print(f"  Weekly: 2,408,161 / 3,000,000  {progress_bar(80.3)}")
+print(f"{DIM}# When approaching budgets, BurnRate injects:{RESET}")
+print()
+print(f"  {BOLD}{YELLOW}## BurnRate Budget{RESET}")
+print(f"  Daily:  607,268 / 800,000 tokens  {progress_bar(75.9)}")
+print(f"  Weekly: 2,408,161 / 3,000,000 tokens  {progress_bar(80.3)}")
 
-# Scene 3: Cost breakdown
-header("Cost tracking")
+# ── Scene 3: Per-Model Cost Breakdown ─────────────────────────────────────────
 
-print(f"  {BOLD}{'Model':<25} {'Tokens':>12} {'Cost':>10}{RESET}")
-print(f"  {'─' * 48}")
-print(f"  claude-opus-4-6          {'746,185':>12} {'$20.84':>10}")
-print(f"  claude-sonnet-4-5        {'124,300':>12}  {'$1.24':>10}")
-print(f"  {'─' * 48}")
-print(f"  {BOLD}{'Total':>25} {'870,485':>12} {'$22.08':>10}{RESET}")
+header("Cost tracking -- per-model breakdown")
 
-# Scene 4: Export
-header("Usage export")
+print(f"{DIM}$ attnroute plugins status burnrate{RESET}")
+print()
+print(f"  {BOLD}{'Model':<26}{'Tokens':>12}{'Cost':>10}{RESET}")
+print(f"  {'-' * 48}")
+print(f"  claude-opus-4-6           {'746,185':>12}{'$20.84':>10}")
+print(f"  claude-sonnet-4-5         {'124,300':>12} {'$1.24':>10}")
+print(f"  {'-' * 48}")
+print(f"  {BOLD}{'Total':<26}{'870,485':>12}{'$22.08':>10}{RESET}")
+print()
+print(f"  {DIM}Cost is API-equivalent pricing (what you'd pay without a subscription){RESET}")
+print(f"  {DIM}Opus: $5/M input, $25/M output | Sonnet: $3/M input, $15/M output{RESET}")
 
-print(f"{DIM}>>> burnrate.export_usage(format='csv', days=7){RESET}")
-print(f"  timestamp,model,project,input_tokens,output_tokens,...")
-print(f"  2026-02-16T02:47:20,claude-opus-4-6,~,1,3839,4701,80432")
-print(f"  2026-02-16T02:47:25,claude-opus-4-6,~,5,1204,0,95841")
-print(f"  {DIM}... 1,083 more records{RESET}")
+# ── Scene 4: Critical Rate Limit Warning ─────────────────────────────────────
 
-# Scene 5: Critical warning
-header("Rate limit warning (injected into Claude's context)")
+header("Turn 47 -- approaching rate limit")
 
+print(f"{DIM}>> keep going, implement the remaining endpoints{RESET}")
+print()
+print(f"{DIM}# BurnRate detects 92.5% window usage, injects warning:{RESET}")
+print()
 print(f"  {BOLD}{RED}## BurnRate WARNING{RESET}")
-print(f"  {BOLD}Estimated time until rate limit: ~12 minutes{RESET}")
-print(f"  Burn rate: 4,200 tokens/min | Used: {RED}1,850,000{RESET} / 2,000,000")
+print(f"  `[##################--]` {BOLD}93%{RESET}")
 print()
-print(f"  {BOLD}Consider:{RESET}")
-print(f"  - Pausing for a few minutes to let the window slide")
-print(f"  - Switching to Sonnet for simple tasks")
-print(f"  - Breaking work into smaller prompts")
+print(f"  {BOLD}Window:{RESET} 1,850,000 / 2,000,000 tokens (max_20x plan, 5h sliding window)")
+print(f"  {BOLD}Burn rate:{RESET} 4,200 tokens/min (last 15.0min)")
+print(f"  {BOLD}ETA to limit:{RESET} ~36 minutes")
+print()
+print(f"  {DIM}Input: 1,204,000 | Output: 412,000 | Cache create: 234,000 | Cache read: 891,000 (242 API calls){RESET}")
+print()
+print(f"  {BOLD}Consider pacing your work{RESET} -- keep prompts focused")
+print(f"  and avoid unnecessary file reads.")
 print()

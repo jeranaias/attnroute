@@ -91,15 +91,15 @@ def parse_ansi(text):
 
 
 # ── Frame renderer ──────────────────────────────────────────
-def render_frame(lines, width=780, title="attnroute", font_size=15):
+def render_frame(lines, width=1400, title="attnroute", font_size=22):
     """Render a list of text lines into a terminal-style PIL image."""
     font = get_font(font_size)
     bold_font = get_bold_font(font_size)
 
-    line_height = font_size + 6
-    padding_x = 20
-    padding_y = 16
-    title_height = 36
+    line_height = font_size + 8
+    padding_x = 32
+    padding_y = 24
+    title_height = 52
     content_height = len(lines) * line_height + padding_y * 2
     height = title_height + content_height + 16  # bottom margin
 
@@ -109,17 +109,17 @@ def render_frame(lines, width=780, title="attnroute", font_size=15):
     # Title bar
     draw.rounded_rectangle(
         [0, 0, width, title_height],
-        radius=8, fill=TITLE_BG
+        radius=12, fill=TITLE_BG
     )
 
     # Traffic light dots
     for i, color in enumerate([(243, 139, 168), (249, 226, 175), (166, 227, 161)]):
-        draw.ellipse([14 + i * 22, 11, 28 + i * 22, 25], fill=color)
+        draw.ellipse([20 + i * 32, 15, 38 + i * 32, 33], fill=color)
 
     # Title text
-    title_font = get_font(13)
+    title_font = get_font(18)
     tw = draw.textlength(title, font=title_font)
-    draw.text(((width - tw) / 2, 10), title, fill=(150, 150, 170), font=title_font)
+    draw.text(((width - tw) / 2, 14), title, fill=(150, 150, 170), font=title_font)
 
     # Content area border
     draw.rounded_rectangle(
@@ -187,7 +187,7 @@ def split_into_scenes(output):
     return scenes
 
 
-def make_gif(script_path, output_path, title="attnroute", frame_duration=2500):
+def make_gif(script_path, output_path, title="attnroute", frame_duration=3000):
     """Generate an animated GIF from a demo script."""
     print(f"  Capturing: {script_path.name}")
     output = capture_output(script_path)

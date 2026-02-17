@@ -27,8 +27,34 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo.gif" alt="attnroute demo — install, plugins, and live status" width="780">
+  <img src="docs/demo.gif" alt="attnroute demo — install, plugins, and live status" width="100%">
 </p>
+
+---
+
+## Plugins in Action
+
+attnroute ships with **4 behavioral plugins** that run automatically — no config needed. Each one addresses a real Claude Code pain point reported by the community.
+
+### VerifyFirst — Read before you write
+> Tracks every file Claude reads. Flags violations when Claude edits a file it never read. Freshness labels degrade over time (fresh → aging → STALE).
+
+<img src="docs/demo_verifyfirst.gif" alt="VerifyFirst — freshness tracking and violation detection" width="100%">
+
+### LoopBreaker — Stop repeating yourself
+> Detects when Claude is stuck making the same failing edit. After 5 attempts, injects a "stop and reconsider" intervention with concrete alternative strategies.
+
+<img src="docs/demo_loopbreaker.gif" alt="LoopBreaker — loop detection and intervention" width="100%">
+
+### BurnRate — Know your token budget
+> Monitors real-time token usage, calculates burn rate, predicts when you'll hit rate limits. Optional daily/weekly budget alerts.
+
+<img src="docs/demo_burnrate.gif" alt="BurnRate — rate limit tracking and budget alerts" width="100%">
+
+### ContextGuard — Survive compaction
+> Predicts when context compaction is coming, then recovers your working file set after it happens. Cross-plugin flag marks all VerifyFirst reads as stale.
+
+<img src="docs/demo_contextguard.gif" alt="ContextGuard — compaction prediction and recovery" width="100%">
 
 ---
 
@@ -90,8 +116,9 @@ attnroute is a **hook system for [Claude Code](https://github.com/anthropics/cla
 
 ## Table of Contents
 
-1. [The Problem](#the-problem)
-2. [How It Works](#how-it-works)
+1. [Plugins in Action](#plugins-in-action)
+2. [The Problem](#the-problem)
+3. [How It Works](#how-it-works)
    - [Attention Tracking](#attention-tracking)
    - [Heat Decay](#heat-decay)
    - [Co-activation Learning](#co-activation-learning)
@@ -640,8 +667,6 @@ All plugins are **enabled by default** and store state in `~/.claude/plugins/`.
 
 ### VerifyFirst
 
-<img src="docs/demo_verifyfirst.gif" alt="VerifyFirst demo — freshness tracking and violation detection" width="780">
-
 **Problem**: Claude sometimes makes speculative edits without first reading the file to understand context, leading to broken code or incorrect assumptions.
 
 **Solution**: VerifyFirst tracks every file Claude reads and flags violations when edits are attempted on unread files.
@@ -670,8 +695,6 @@ You MUST read a file before editing it.
 ---
 
 ### LoopBreaker
-
-<img src="docs/demo_loopbreaker.gif" alt="LoopBreaker demo — loop detection and intervention" width="780">
 
 **Problem**: Claude sometimes gets stuck making "multiple broken attempts instead of thinking through problems" — repeating the same failing approach 3, 4, 5+ times.
 
@@ -715,8 +738,6 @@ signature = f"{tool}|{normalized_path}|{key_identifiers}|{command}"
 ---
 
 ### BurnRate
-
-<img src="docs/demo_burnrate.gif" alt="BurnRate demo — rate limit tracking and budget alerts" width="780">
 
 **Problem**: Users report 10x variance in quota consumption rates, hitting rate limits unexpectedly with no warning.
 
@@ -766,8 +787,6 @@ signature = f"{tool}|{normalized_path}|{key_identifiers}|{command}"
 ---
 
 ### ContextGuard
-
-<img src="docs/demo_contextguard.gif" alt="ContextGuard demo — compaction prediction and recovery" width="780">
 
 **Problem**: When Claude Code's context window fills up (~95%), it compacts the conversation, losing all injected state including file context. This is the #1 community pain point — Claude "forgets" what it was working on.
 
