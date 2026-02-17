@@ -163,24 +163,44 @@ def strip_ansi(text):
 
 
 def split_into_scenes(output):
-    """Split output into scenes (separated by the ─ header lines)."""
+    """Split output into scenes. Each scene = header text + ─ line + content.
+
+    The header() function prints: \\n + bold title + ─ separator.
+    We split so the title line stays WITH its content, not the previous scene.
+    """
     lines = output.split('\n')
     scenes = []
     current_scene = []
 
     for line in lines:
-        # Strip ANSI codes before checking for separator
         plain = strip_ansi(line)
         if '─' * 20 in plain and current_scene:
-            # Finish previous scene
-            scenes.append(current_scene)
+            # The line BEFORE this separator is the header title — pull it
+            # from the current scene into the new one.
+            header_line = None
+            # Pop trailing blank lines off the current scene
+            trailing = []
+            while current_scene and not strip_ansi(current_scene[-1]).strip():
+                trailing.append(current_scene.pop())
+            # The last non-blank line is the header title
+            if current_scene:
+                header_line = current_scene.pop()
+
+            # Save what remains as the previous scene (if non-empty)
+            if any(strip_ansi(l).strip() for l in current_scene):
+                scenes.append(current_scene)
+
+            # Start the new scene with the header title + separator
             current_scene = []
-        current_scene.append(line)
+            if header_line:
+                current_scene.append(header_line)
+            current_scene.append(line)
+        else:
+            current_scene.append(line)
 
     if current_scene:
         scenes.append(current_scene)
 
-    # If no scenes detected, treat whole output as one scene
     if not scenes:
         scenes = [lines]
 
@@ -205,28 +225,31 @@ def make_gif(script_path, output_path, title="attnroute", frame_duration=3000):
     while all_lines and not all_lines[-1].strip():
         all_lines.pop()
 
-    # Build the list of line sets for each frame (progressive reveal)
-    frame_lines = []
-    accumulated = []
+    # Each frame = one scene (not accumulated). All padded to same height.
+    scene_lines = []
     for scene in scenes:
-        accumulated.extend(scene)
-        clean = list(accumulated)
+        clean = list(scene)
         while clean and not clean[-1].strip():
             clean.pop()
+        # Strip leading empty lines too
+        while clean and not clean[0].strip():
+            clean.pop(0)
         if clean:
-            frame_lines.append(list(clean))
+            scene_lines.append(clean)
 
-    if not frame_lines:
+    if not scene_lines:
         print(f"  ERROR: No frames generated for {script_path}")
         return
 
-    # Calculate height from the FINAL (largest) frame so all frames match
-    final_frame = render_frame(frame_lines[-1], title=title)
-    target_height = final_frame.size[1]
+    # Find the tallest single scene so all frames share the same height
+    max_line_count = max(len(s) for s in scene_lines)
+    target_height = render_frame(
+        [""] * max_line_count, title=title
+    ).size[1]
 
-    # Render all frames at the same height
+    # Render each scene as its own frame, all at the same height
     frames = []
-    for lines in frame_lines:
+    for lines in scene_lines:
         frame = render_frame(lines, title=title, min_height=target_height)
         frames.append(frame)
 
