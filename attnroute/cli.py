@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -381,6 +382,84 @@ def cmd_validate(args):
     return 1 if errors else 0
 
 
+def cmd_warmup(args):
+    """Hard warmup: analyze project for instant context routing."""
+    from attnroute.warmup import analyze_warmup, apply_warmup_to_state, build_warmup_state
+
+    project = args.project or os.getcwd()
+
+    if args.analyze:
+        analysis = analyze_warmup(project)
+        print()
+        print("=" * 60)
+        print("HARD WARMUP ANALYSIS")
+        print("=" * 60)
+        print()
+        for signal_name, info in analysis.get("signals", {}).items():
+            print(f"  {signal_name}:")
+            if "top_5" in info:
+                for path, score in info["top_5"]:
+                    print(f"    {score:.3f}  {path}")
+            elif "paths" in info:
+                for p in info["paths"][:5]:
+                    print(f"    {p}")
+            elif "most_imported" in info:
+                for path, count in info["most_imported"]:
+                    print(f"    {count:>3}x  {path}")
+            print(f"    ({info.get('files', info.get('files_with_imports', 0))} files)")
+            print()
+
+        result = analysis.get("result", {})
+        print(f"  Combined: {result.get('hot_count', 0)} HOT, "
+              f"{result.get('warm_count', 0)} WARM, "
+              f"{result.get('total_files', 0)} total "
+              f"({result.get('warmup_ms', 0):.0f}ms)")
+        print()
+        print("  Top HOT files:")
+        for path, score in result.get("hot_files", [])[:5]:
+            print(f"    {score:.3f}  {path}")
+        print()
+        print("  Top WARM files:")
+        for path, score in result.get("warm_files", [])[:5]:
+            print(f"    {score:.3f}  {path}")
+    elif args.apply:
+        apply_warmup_to_state(project)
+    else:
+        # Default: show warmup state
+        build_warmup_state(project, verbose=True)
+
+
+def cmd_train(args):
+    """Train neural file predictor from session history."""
+    if args.v2:
+        print("FileGRUv2 (feature-based) training is experimental.")
+        print("Use --data-dir to provide external training data (GH Archive / local git repos).")
+        if args.data_dir:
+            from attnroute.data.gh_archive_etl import extract_from_repos_dir
+            samples = extract_from_repos_dir(args.data_dir, max_commits_per_repo=500)
+            print(f"Extracted {len(samples)} samples from {args.data_dir}")
+        else:
+            print("No --data-dir provided. Use `attnroute data extract` to gather training data first.")
+        return 0
+
+    from attnroute.neural_predictor import (
+        benchmark_neural,
+        save_neural_model,
+        train_model,
+    )
+
+    model, vocab, metrics = train_model(
+        max_sessions=args.sessions,
+        epochs=args.epochs,
+    )
+    if model is not None:
+        save_neural_model(model, vocab)
+        benchmark_neural(model, vocab)
+    else:
+        print("Training failed — not enough data.")
+        return 1
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -475,6 +554,26 @@ For more information, visit: https://github.com/jeranaias/attnroute
     # validate command
     subparsers.add_parser("validate", help="Validate installation and configuration")
 
+    # warmup command
+    warmup_parser = subparsers.add_parser("warmup", help="Hard warmup: analyze project for instant context routing")
+    warmup_parser.add_argument("--project", type=str, default=None,
+                               help="Project path (default: current directory)")
+    warmup_parser.add_argument("--analyze", action="store_true",
+                               help="Show analysis without applying")
+    warmup_parser.add_argument("--apply", action="store_true",
+                               help="Apply warmup to attention state")
+
+    # train command
+    train_parser = subparsers.add_parser("train", help="Train neural file predictor from session history")
+    train_parser.add_argument("--sessions", type=int, default=200,
+                              help="Max sessions to train on")
+    train_parser.add_argument("--epochs", type=int, default=15,
+                              help="Training epochs")
+    train_parser.add_argument("--v2", action="store_true",
+                              help="Train feature-based v2 model (experimental)")
+    train_parser.add_argument("--data-dir", type=str, default=None,
+                              help="Directory with external training data (for v2)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -495,6 +594,8 @@ For more information, visit: https://github.com/jeranaias/attnroute
         "plugins": cmd_plugins,
         "ingest": cmd_ingest,
         "validate": cmd_validate,
+        "warmup": cmd_warmup,
+        "train": cmd_train,
     }
 
     handler = commands.get(args.command)

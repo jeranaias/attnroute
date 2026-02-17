@@ -1,0 +1,223 @@
+{
+  "plugin": "verifyfirst",
+  "version": "2.0.0",
+  "scenarios": [
+    {
+      "name": "edit_without_read",
+      "description": "Edit a file that was never read — should trigger CRITICAL violation",
+      "expect_violation": true,
+      "expect_severity": "CRITICAL",
+      "steps": [
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/handler.py",
+              "input": {
+                "file_path": "/project/src/handler.py",
+                "old_string": "def handle():",
+                "new_string": "def handle(request):"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "edit_after_fresh_read",
+      "description": "Read a file then immediately edit it — should NOT trigger violation",
+      "expect_violation": false,
+      "steps": [
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Read",
+              "target": "/project/src/handler.py"
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/handler.py",
+              "input": {
+                "file_path": "/project/src/handler.py",
+                "old_string": "def handle():",
+                "new_string": "def handle(request):"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "edit_after_stale_read",
+      "description": "Read a file, wait 12 turns, then edit — no violation (file was read), but stale read shows in context",
+      "expect_violation": false,
+      "steps": [
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Read",
+              "target": "/project/src/old_file.py"
+            }
+          ]
+        },
+        {
+          "action": "on_stop_repeat",
+          "repeat": 11,
+          "tool_calls": [
+            {
+              "tool": "Read",
+              "target": "/project/src/other.py"
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/old_file.py",
+              "input": {
+                "file_path": "/project/src/old_file.py",
+                "old_string": "x = 1",
+                "new_string": "x = 2"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "multiple_files_mixed",
+      "description": "Mix of reads and edits across multiple files — tests mixed severity",
+      "expect_violation": true,
+      "expect_severity": "CRITICAL",
+      "steps": [
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Read",
+              "target": "/project/src/a.py"
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/a.py",
+              "input": {
+                "file_path": "/project/src/a.py",
+                "old_string": "pass",
+                "new_string": "return True"
+              }
+            },
+            {
+              "tool": "Edit",
+              "target": "/project/src/b.py",
+              "input": {
+                "file_path": "/project/src/b.py",
+                "old_string": "pass",
+                "new_string": "return False"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "compliance_improvement",
+      "description": "Start with violations, then improve — analytics should track improvement",
+      "expect_violation": true,
+      "check_analytics": true,
+      "steps": [
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/v1.py",
+              "input": {"file_path": "/project/src/v1.py", "old_string": "a", "new_string": "b"}
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/v2.py",
+              "input": {"file_path": "/project/src/v2.py", "old_string": "c", "new_string": "d"}
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Read",
+              "target": "/project/src/good1.py"
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/good1.py",
+              "input": {"file_path": "/project/src/good1.py", "old_string": "e", "new_string": "f"}
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Read",
+              "target": "/project/src/good2.py"
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/good2.py",
+              "input": {"file_path": "/project/src/good2.py", "old_string": "g", "new_string": "h"}
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Read",
+              "target": "/project/src/good3.py"
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/good3.py",
+              "input": {"file_path": "/project/src/good3.py", "old_string": "i", "new_string": "j"}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

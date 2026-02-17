@@ -542,6 +542,15 @@ class FilePredictor:
         predictions = predict_files_v5("", self._model, recent_files)
         return predictions[:top_k]
 
+    def predict_with_prompt(self, prompt: str, recent_files: list[str],
+                            top_k: int = 3) -> list[tuple[str, float]]:
+        """Predict with both prompt keywords and file sequence."""
+        self._ensure_model()
+        if self._model is None:
+            return []
+        predictions = predict_files_v5(prompt, self._model, recent_files)
+        return predictions[:top_k]
+
     def retrain(self, max_sessions: int = 200):
         """Retrain the model from scratch and save it."""
         print("[predictor] Retraining model...", file=sys.stderr)

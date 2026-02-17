@@ -65,6 +65,12 @@ def _discover_plugins_unlocked() -> None:
     except ImportError:
         pass
 
+    try:
+        from attnroute.plugins.contextguard import ContextGuardPlugin
+        _register_plugin_unlocked(ContextGuardPlugin)
+    except ImportError:
+        pass
+
 
 def _register_plugin_unlocked(plugin_class: type[AttnroutePlugin]) -> None:
     """Register a plugin class (must be called with _lock held)."""
@@ -118,7 +124,7 @@ def _set_plugin_enabled(name: str, enabled: bool) -> bool:
 
     # Validate plugin name to prevent path traversal
     try:
-        from attnroute.compat import validate_plugin_name, safe_atomic_write
+        from attnroute.compat import safe_atomic_write, validate_plugin_name
         validate_plugin_name(name)
     except ImportError:
         # Fallback: basic validation

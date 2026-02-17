@@ -87,7 +87,7 @@ MATURITY_LEVELS = [
 
 MATURITY_BOOST_WEIGHT = {
     "observing": 0.0,   # Don't boost until we have data
-    "active":    0.35,  # Full confidence after 25 turns
+    "active":    0.45,  # Full confidence after 25 turns — trust learned associations
     "wise":      0.45,  # Fallback for very old sessions (unused but defined for safety)
 }
 

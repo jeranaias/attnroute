@@ -49,8 +49,8 @@ class BurnRatePlugin(AttnroutePlugin):
     """
 
     name = "burnrate"
-    version = "0.3.0"
-    description = "Real-time rate limit tracker with historical usage reports"
+    version = "1.0.0"
+    description = "Real-time rate limit tracker with historical usage reports and budget alerts"
 
     # --- Configuration ---
 
@@ -133,6 +133,78 @@ class BurnRatePlugin(AttnroutePlugin):
         self._cached_records: list[dict] = []
         self._cache_time: datetime | None = None
 
+    def _load_budget_config(self) -> tuple[int, int]:
+        """Load daily and weekly budget limits from config file.
+
+        Reads from ~/.claude/plugins/config.json under the "burnrate" key.
+        Expected format:
+            {"burnrate": {"daily_budget": 50000, "weekly_budget": 250000}}
+
+        Returns:
+            (daily_budget, weekly_budget) in tokens.
+            Defaults to (0, 0) which means budgets are disabled.
+        """
+        config_path = self.CLAUDE_DIR / "plugins" / "config.json"
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                config = json.load(f)
+        except (FileNotFoundError, OSError):
+            return (0, 0)
+        except (json.JSONDecodeError, ValueError):
+            return (0, 0)
+
+        if not isinstance(config, dict):
+            return (0, 0)
+
+        burnrate_cfg = config.get("burnrate", {})
+        if not isinstance(burnrate_cfg, dict):
+            return (0, 0)
+
+        daily = burnrate_cfg.get("daily_budget", 0)
+        weekly = burnrate_cfg.get("weekly_budget", 0)
+
+        # Ensure values are non-negative integers
+        try:
+            daily = max(0, int(daily))
+        except (TypeError, ValueError):
+            daily = 0
+        try:
+            weekly = max(0, int(weekly))
+        except (TypeError, ValueError):
+            weekly = 0
+
+        return (daily, weekly)
+
+    def _compute_budget_usage(self) -> tuple[int, int]:
+        """Compute daily and weekly token usage from a single history scan.
+
+        Performs one _scan_history(days=7) call and filters the results:
+          - Daily usage: records from today (UTC)
+          - Weekly usage: all records from the 7-day scan
+
+        Returns:
+            (daily_tokens, weekly_tokens) — billable tokens consumed.
+        """
+        records = self._scan_history(days=7)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        weekly_tokens = 0
+        daily_tokens = 0
+
+        for r in records:
+            billable = (
+                r.get("input_tokens", 0)
+                + r.get("output_tokens", 0)
+                + r.get("cache_creation_tokens", 0)
+            )
+            weekly_tokens += billable
+
+            ts = self._parse_timestamp(r.get("timestamp"))
+            if ts and ts.strftime("%Y-%m-%d") == today:
+                daily_tokens += billable
+
+        return (daily_tokens, weekly_tokens)
+
     def on_session_start(self, session_state: dict) -> str | None:
         """Initialize tracking and show current window status."""
         now = datetime.now(timezone.utc)
@@ -152,6 +224,8 @@ class BurnRatePlugin(AttnroutePlugin):
             "plan_type": plan,
             "warnings_issued": 0,
             "last_scan": now.isoformat(),
+            "baseline_window_tokens": stats["window_tokens"],
+            "baseline_api_calls": stats["api_calls"],
         })
 
         return (
@@ -187,8 +261,40 @@ class BurnRatePlugin(AttnroutePlugin):
 
         pct = (stats["window_tokens"] / limit) * 100
 
+        # --- Budget alerts (checked before rate limit early return) ---
+        budget_block = ""
+        daily_budget, weekly_budget = self._load_budget_config()
+        if daily_budget > 0 or weekly_budget > 0:
+            daily_used, weekly_used = self._compute_budget_usage()
+            budget_lines = []
+
+            if daily_budget > 0:
+                daily_pct = daily_used / daily_budget * 100
+                if daily_pct >= 80:
+                    bar_filled = int(10 * min(daily_pct, 100) / 100)
+                    bar = "\u2588" * bar_filled + "\u2591" * (10 - bar_filled)
+                    budget_lines.append(
+                        f"Daily: {daily_used:,} / {daily_budget:,} tokens "
+                        f"[{bar}] {daily_pct:.0f}%"
+                    )
+
+            if weekly_budget > 0:
+                weekly_pct = weekly_used / weekly_budget * 100
+                if weekly_pct >= 80:
+                    bar_filled = int(10 * min(weekly_pct, 100) / 100)
+                    bar = "\u2588" * bar_filled + "\u2591" * (10 - bar_filled)
+                    budget_lines.append(
+                        f"Weekly: {weekly_used:,} / {weekly_budget:,} tokens "
+                        f"[{bar}] {weekly_pct:.0f}%"
+                    )
+
+            if budget_lines:
+                budget_block = (
+                    "## BurnRate Budget\n" + "\n".join(budget_lines)
+                )
+
         if pct < self.WARN_PCT:
-            return ""  # No warning needed — don't waste context tokens
+            return budget_block  # Return budget alert even when rate limit is fine
 
         # Calculate burn rate
         burn = self._calculate_burn_rate(records, now)
@@ -197,10 +303,13 @@ class BurnRatePlugin(AttnroutePlugin):
         state["warnings_issued"] = state.get("warnings_issued", 0) + 1
         self.save_state(state)
 
-        return self._format_warning(stats, burn, plan, limit, pct)
+        warning = self._format_warning(stats, burn, plan, limit, pct)
+        if budget_block:
+            return budget_block + "\n\n" + warning
+        return warning
 
     def on_stop(self, tool_calls: list[dict], session_state: dict) -> str | None:
-        """Log sample to history after each turn."""
+        """Log sample to history after each turn. Once per day, compute weekly summary."""
         now = datetime.now(timezone.utc)
         records = self._scan_window(now)
         stats = self._compute_window_stats(records)
@@ -211,6 +320,38 @@ class BurnRatePlugin(AttnroutePlugin):
                 f.write(json.dumps(entry) + "\n")
         except Exception:
             pass
+
+        # --- Weekly summary (once per day) ---
+        state = self.load_state()
+        today_str = now.strftime("%Y-%m-%d")
+        last_update = state.get("last_weekly_update", "")
+
+        if last_update != today_str:
+            history_records = self._scan_history(days=7)
+            if history_records:
+                total_tokens = 0
+                total_calls = len(history_records)
+                by_model: dict[str, int] = {}
+
+                for r in history_records:
+                    billable = (
+                        r.get("input_tokens", 0)
+                        + r.get("output_tokens", 0)
+                        + r.get("cache_creation_tokens", 0)
+                    )
+                    total_tokens += billable
+                    model = r.get("model", "unknown")
+                    by_model[model] = by_model.get(model, 0) + billable
+
+                state["weekly_summary"] = {
+                    "date": today_str,
+                    "tokens": total_tokens,
+                    "by_model": by_model,
+                    "api_calls": total_calls,
+                }
+
+            state["last_weekly_update"] = today_str
+            self.save_state(state)
 
         return None
 
@@ -660,9 +801,9 @@ class BurnRatePlugin(AttnroutePlugin):
         """
         window = stats.get("window_tokens", 0)
 
-        if window > 500_000:
+        if window >= 500_000:
             return "max_20x"
-        elif window > 150_000:
+        elif window >= 150_000:
             return "max_5x"
 
         return "pro"
@@ -959,8 +1100,9 @@ class BurnRatePlugin(AttnroutePlugin):
         for r in records:
             ts = self._parse_timestamp(r["timestamp"])
             if ts:
-                # Use local hour (convert from UTC)
-                local_hour = (ts.hour - 5) % 24  # EST approximation
+                # Convert UTC timestamp to local hour
+                local_ts = ts.astimezone()
+                local_hour = local_ts.hour
                 billable = (
                     r.get("input_tokens", 0)
                     + r.get("output_tokens", 0)
@@ -1740,4 +1882,80 @@ class BurnRatePlugin(AttnroutePlugin):
                     remaining / burn["tokens_per_minute"], 1,
                 )
 
+        # Session-level delta: tokens consumed since this session started
+        baseline_tokens = state.get("baseline_window_tokens", 0)
+        baseline_calls = state.get("baseline_api_calls", 0)
+        summary["session_tokens"] = max(0, stats["window_tokens"] - baseline_tokens)
+        summary["session_api_calls"] = max(0, stats["api_calls"] - baseline_calls)
+
         return summary
+
+    # ------------------------------------------------------------------ #
+    #  Data export — CLI callable                                         #
+    # ------------------------------------------------------------------ #
+
+    def export_usage(self, format: str = "csv", days: int = 7) -> str:
+        """Export raw usage records as CSV or JSON.
+
+        This is a public, non-hook method intended to be called from
+        a CLI or external tooling.
+
+        Args:
+            format: "csv" or "json"
+            days: Number of days of history to export (default 7)
+
+        Returns:
+            Formatted string (CSV with header row, or JSON document).
+
+        Raises:
+            ValueError: If format is not "csv" or "json".
+        """
+        if format not in ("csv", "json"):
+            raise ValueError(
+                f"Unknown format {format!r}. Use 'csv' or 'json'."
+            )
+
+        records = self._scan_history(days=days)
+
+        if format == "json":
+            export = {
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "days": days,
+                "records": [
+                    {
+                        "timestamp": r.get("timestamp", ""),
+                        "model": r.get("model", "unknown"),
+                        "project": r.get("project", "unknown"),
+                        "input_tokens": r.get("input_tokens", 0),
+                        "output_tokens": r.get("output_tokens", 0),
+                        "cache_creation_tokens": r.get(
+                            "cache_creation_tokens", 0,
+                        ),
+                        "cache_read_tokens": r.get("cache_read_tokens", 0),
+                    }
+                    for r in records
+                ],
+            }
+            return json.dumps(export, indent=2)
+
+        # CSV format
+        header = (
+            "timestamp,model,project,input_tokens,output_tokens,"
+            "cache_creation_tokens,cache_read_tokens"
+        )
+        lines = [header]
+        for r in records:
+            # Escape commas in project names by quoting
+            project = r.get("project", "unknown")
+            if "," in project or '"' in project:
+                project = '"' + project.replace('"', '""') + '"'
+            lines.append(
+                f"{r.get('timestamp', '')},"
+                f"{r.get('model', 'unknown')},"
+                f"{project},"
+                f"{r.get('input_tokens', 0)},"
+                f"{r.get('output_tokens', 0)},"
+                f"{r.get('cache_creation_tokens', 0)},"
+                f"{r.get('cache_read_tokens', 0)}"
+            )
+        return "\n".join(lines)

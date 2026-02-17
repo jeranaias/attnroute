@@ -1,0 +1,193 @@
+{
+  "plugin": "loopbreaker",
+  "version": "2.0.0",
+  "scenarios": [
+    {
+      "name": "identical_edit_loop",
+      "description": "Same exact edit 5 times — should detect loop at attempt 3 (NOTICE), escalate at 5 (WARNING)",
+      "expect_detection": true,
+      "expect_severity_progression": ["NOTICE", "WARNING"],
+      "steps": [
+        {
+          "action": "on_stop_repeat",
+          "repeat": 5,
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/bug.py",
+              "input": {
+                "file_path": "/project/src/bug.py",
+                "old_string": "return None",
+                "new_string": "return result"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "different_edits_same_file",
+      "description": "5 different edits to the same file — should NOT detect loop (content-aware)",
+      "expect_detection": false,
+      "steps": [
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/refactor.py",
+              "input": {"file_path": "/project/src/refactor.py", "old_string": "def foo():", "new_string": "def foo(x):"}
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/refactor.py",
+              "input": {"file_path": "/project/src/refactor.py", "old_string": "def bar():", "new_string": "def bar(y):"}
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/refactor.py",
+              "input": {"file_path": "/project/src/refactor.py", "old_string": "def baz():", "new_string": "def baz(z):"}
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/refactor.py",
+              "input": {"file_path": "/project/src/refactor.py", "old_string": "class A:", "new_string": "class A(Base):"}
+            }
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/refactor.py",
+              "input": {"file_path": "/project/src/refactor.py", "old_string": "import os", "new_string": "import sys"}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "bounce_pattern",
+      "description": "A→B→A→B→A→B alternating edits — different content so no loop warning, but bounce detected in summary",
+      "expect_detection": false,
+      "expect_bounce": true,
+      "steps": [
+        {
+          "action": "on_stop",
+          "tool_calls": [{"tool": "Edit", "target": "/project/src/a.py", "input": {"file_path": "/project/src/a.py", "old_string": "x=1", "new_string": "x=2"}}]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [{"tool": "Edit", "target": "/project/src/b.py", "input": {"file_path": "/project/src/b.py", "old_string": "y=1", "new_string": "y=2"}}]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [{"tool": "Edit", "target": "/project/src/a.py", "input": {"file_path": "/project/src/a.py", "old_string": "x=2", "new_string": "x=3"}}]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [{"tool": "Edit", "target": "/project/src/b.py", "input": {"file_path": "/project/src/b.py", "old_string": "y=2", "new_string": "y=3"}}]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [{"tool": "Edit", "target": "/project/src/a.py", "input": {"file_path": "/project/src/a.py", "old_string": "x=3", "new_string": "x=4"}}]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [{"tool": "Edit", "target": "/project/src/b.py", "input": {"file_path": "/project/src/b.py", "old_string": "y=3", "new_string": "y=4"}}]
+        }
+      ]
+    },
+    {
+      "name": "bash_error_loop",
+      "description": "Same failing Bash command 4 times — should track error pattern",
+      "expect_detection": true,
+      "expect_error_tracking": true,
+      "steps": [
+        {
+          "action": "on_stop_repeat",
+          "repeat": 4,
+          "tool_calls": [
+            {
+              "tool": "Bash",
+              "target": "python run_broken_script.py",
+              "input": {
+                "command": "python run_broken_script.py"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "mixed_tools_no_loop",
+      "description": "Diverse tool calls with no repetition — should NOT trigger false positive",
+      "expect_detection": false,
+      "steps": [
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {"tool": "Edit", "target": "/project/src/a.py", "input": {"file_path": "/project/src/a.py", "old_string": "a1", "new_string": "a2"}}
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {"tool": "Write", "target": "/project/src/new.py", "input": {"file_path": "/project/src/new.py", "content": "# new file"}}
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {"tool": "Edit", "target": "/project/src/b.py", "input": {"file_path": "/project/src/b.py", "old_string": "b1", "new_string": "b2"}}
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {"tool": "Bash", "target": "ls -la", "input": {"command": "ls -la"}}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "escalation_to_critical",
+      "description": "Same action 8 times — verify full escalation NOTICE→WARNING→CRITICAL",
+      "expect_detection": true,
+      "expect_severity_progression": ["NOTICE", "WARNING", "CRITICAL"],
+      "steps": [
+        {
+          "action": "on_stop_repeat",
+          "repeat": 8,
+          "tool_calls": [
+            {
+              "tool": "Edit",
+              "target": "/project/src/stuck.py",
+              "input": {
+                "file_path": "/project/src/stuck.py",
+                "old_string": "broken_code()",
+                "new_string": "fixed_code()"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

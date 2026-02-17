@@ -66,7 +66,7 @@ attnroute is a **hook system for [Claude Code](https://github.com/anthropics/cla
 
 **The core innovation**: attnroute maintains a "working memory" of your codebase—tracking which files you interact with, learning co-activation patterns, and using PageRank on dependency graphs to rank importance.
 
-**v0.5.7+ source code routing**: The search index covers your actual source tree, not just `.claude/*.md` docs. Source files matched by BM25 get tree-sitter outline injection (function signatures, class definitions, imports)—not raw file content. No config needed—just works.
+**v0.7.0+ source code routing**: The search index covers your actual source tree, not just `.claude/*.md` docs. Source files matched by BM25 get tree-sitter outline injection (function signatures, class definitions, imports)—not raw file content. No config needed—just works.
 
 ### Verified Performance
 
@@ -117,6 +117,7 @@ attnroute is a **hook system for [Claude Code](https://github.com/anthropics/cla
    - [VerifyFirst](#verifyfirst)
    - [LoopBreaker](#loopbreaker)
    - [BurnRate](#burnrate)
+   - [ContextGuard](#contextguard)
    - [Plugin CLI](#plugin-cli)
 10. [Troubleshooting](#troubleshooting)
 11. [Contributing](#contributing)
@@ -564,7 +565,7 @@ Fast keyword-based search using BM25 algorithm.
 pip install attnroute[search]
 ```
 
-**What it does**: Matches prompt keywords to file content using probabilistic ranking.
+**What it does**: Matches prompt keywords to file content using BM25F field weighting. Filenames and paths are boosted 5x, symbol names (classes, functions) 3x, and file content 1x — based on Sourcegraph research showing +20% search quality improvement from field weighting.
 
 **When it helps**: Finding files by specific function names, variable names, or technical terms.
 
@@ -619,6 +620,7 @@ Plugins hook into the session lifecycle: `SessionStart`, `UserPrompt` (pre/post)
 | **VerifyFirst** | Enforces read-before-write policy | [GitHub #23833](https://github.com/anthropics/claude-code/issues/23833) |
 | **LoopBreaker** | Detects repetitive failure loops | [GitHub #21431](https://github.com/anthropics/claude-code/issues/21431) |
 | **BurnRate** | Predicts rate limit exhaustion | [GitHub #22435](https://github.com/anthropics/claude-code/issues/22435) |
+| **ContextGuard** | Post-compaction amnesia prevention | Context compaction data loss |
 
 All plugins are **enabled by default** and store state in `~/.claude/plugins/`.
 
@@ -730,6 +732,29 @@ signature = f"{tool}|{normalized_path}|{key_identifiers}|{command}"
 
 ---
 
+### ContextGuard
+
+**Problem**: When Claude Code's context window fills up (~95%), it compacts the conversation, losing all injected state including file context. This is the #1 community pain point — Claude "forgets" what it was working on.
+
+**Solution**: ContextGuard monitors the active file count across turns. If it detects a sudden drop (50%+), it re-injects a compact recovery block listing the key files from before compaction.
+
+**How it works**: Every turn, ContextGuard snapshots the top 15 files with attention score >= 0.25. If the active count drops by 50%+ in a single turn (the compaction signature), it injects:
+
+```markdown
+## Context Recovery (post-compaction)
+Key files from your working set before context was compacted:
+
+- `src/auth.py` (auth.py)
+- `src/session.py` (session.py)
+- `src/middleware.py` (middleware.py)
+
+_These files were recently active. Re-read any you need._
+```
+
+**Recovery is automatic**: No user action needed. Claude sees the recovery block and knows which files to re-read.
+
+---
+
 ### Plugin CLI
 
 ```bash
@@ -740,7 +765,8 @@ attnroute plugins list
 # Installed plugins:
 #   verifyfirst v0.1.0 - Ensures files are read before being edited [enabled]
 #   loopbreaker v0.1.0 - Detects and breaks repetitive failure loops [enabled]
-#   burnrate v0.1.0 - Predicts and warns about rate limit consumption [enabled]
+#   burnrate v0.3.0 - Real-time rate limit tracker with historical usage reports [enabled]
+#   contextguard v0.1.0 - Post-compaction amnesia prevention [enabled]
 
 # View plugin statistics
 attnroute plugins status verifyfirst
@@ -789,7 +815,8 @@ attnroute plugins enable burnrate
 ├── loopbreaker_state.json           # LoopBreaker session state
 ├── loopbreaker_events.jsonl         # Loop detection events
 ├── burnrate_state.json              # BurnRate session state
-└── burnrate_history.jsonl           # Token usage history
+├── burnrate_history.jsonl           # Token usage history
+└── contextguard_state.json          # ContextGuard session state
 ```
 
 ---
@@ -853,7 +880,7 @@ pip install attnroute[all]
 
 ## Security
 
-attnroute v0.5.13 includes comprehensive security hardening:
+attnroute v0.7.0 includes comprehensive security hardening:
 
 ### Input Validation
 - **Stdin size limits**: 10MB max to prevent memory exhaustion attacks

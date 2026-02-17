@@ -1,0 +1,65 @@
+{
+  "plugin": "burnrate",
+  "version": "0.3.0",
+  "scenarios": [
+    {
+      "name": "normal_session",
+      "description": "Mix of tool calls at normal pace — plugin should initialize without errors",
+      "expect_error": false,
+      "steps": [
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {"tool": "Read", "target": "/project/src/main.py"},
+            {"tool": "Grep", "target": "*.py"}
+          ]
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {"tool": "Edit", "target": "/project/src/main.py", "input": {"old_string": "a", "new_string": "b"}},
+            {"tool": "Bash", "target": "pytest tests/", "input": {"command": "pytest tests/"}}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "rapid_burn",
+      "description": "50 tool calls in rapid succession — tests plugin performance under load",
+      "expect_error": false,
+      "steps": [
+        {
+          "action": "on_stop_repeat",
+          "repeat": 50,
+          "tool_calls": [
+            {"tool": "Edit", "target": "/project/src/file.py", "input": {"old_string": "x", "new_string": "y"}}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "session_lifecycle",
+      "description": "Full session lifecycle — start, prompts, stops — tests all hooks",
+      "expect_error": false,
+      "steps": [
+        {
+          "action": "on_session_start",
+          "session_state": {"session_id": "bench-test"}
+        },
+        {
+          "action": "on_prompt_post",
+          "prompt": "Fix the authentication bug",
+          "context_output": "## HOT files\n- src/auth.py",
+          "session_state": {}
+        },
+        {
+          "action": "on_stop",
+          "tool_calls": [
+            {"tool": "Read", "target": "/project/src/auth.py"},
+            {"tool": "Edit", "target": "/project/src/auth.py", "input": {"old_string": "pass", "new_string": "return True"}}
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -37,6 +37,12 @@ except ImportError:
 # Index storage location
 INDEX_DB = TELEMETRY_DIR / "search_index.db"
 
+# BM25F field weights (simulated via token repetition)
+# Sourcegraph research: 5x symbol/filename boost yields +20% search quality
+FIELD_WEIGHT_PATH = 5        # Filename/path tokens — strongest signal
+FIELD_WEIGHT_FINGERPRINT = 3  # Class/function names — semantic intent
+FIELD_WEIGHT_CONTENT = 1     # File content/outline — base weight
+
 # Source file configuration
 SOURCE_MAX_FILE_SIZE = 100_000  # 100KB - skip files larger than this
 SOURCE_EXTENSIONS = {
@@ -182,6 +188,78 @@ class SimpleTFIDF:
         return re.findall(r'[a-z][a-z0-9_]{2,}', text.lower())
 
 
+def _extract_content_fingerprint(file_path: Path) -> str:
+    """Extract a search-optimized fingerprint from a source file.
+
+    Produces a compact string of class names, function names, docstring,
+    and imports — designed for BM25 matching. "fix the authentication"
+    will match a file containing "class AuthHandler".
+    """
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+
+    lines = content.split("\n")
+    parts = []
+
+    # Extract first docstring or comment (file description)
+    for line in lines[:15]:
+        stripped = line.strip()
+        if stripped.startswith('"""') or stripped.startswith("'''"):
+            doc = stripped.strip("\"'").strip()
+            if doc:
+                parts.append(doc[:150])
+                break
+        elif stripped.startswith("#") and not stripped.startswith("#!"):
+            parts.append(stripped.lstrip("# ").strip()[:100])
+            break
+
+    # Extract class names
+    for m in re.finditer(r'^class\s+(\w+)', content, re.MULTILINE):
+        name = m.group(1)
+        # Split CamelCase into words: AuthHandler -> auth handler
+        words = re.sub(r'([a-z])([A-Z])', r'\1 \2', name).lower()
+        parts.append(f"{name} {words}")
+
+    # Extract function/method names
+    func_names = []
+    for m in re.finditer(r'^(?:    )?def\s+(\w+)', content, re.MULTILINE):
+        name = m.group(1)
+        if not name.startswith("_"):
+            # Split snake_case: update_attention -> update attention
+            words = name.replace("_", " ")
+            func_names.append(f"{name} {words}")
+    # Cap at 20 functions to avoid noise
+    parts.extend(func_names[:20])
+
+    # Extract key imports (what this file depends on)
+    for m in re.finditer(r'^(?:from\s+\S+\s+)?import\s+(\w+)', content, re.MULTILINE):
+        name = m.group(1)
+        if len(name) > 3 and name not in ("json", "sys", "os", "re", "Path"):
+            parts.append(name)
+
+    return " ".join(parts)
+
+
+def _path_to_tokens(path: str) -> str:
+    """Convert a file path into searchable tokens.
+
+    "attnroute/context_router.py" → "attnroute context router py context_router"
+    This allows BM25 to find files by name when users mention them in prompts.
+    """
+    # Split on separators
+    parts = re.split(r'[/\\._\-]', path)
+    # Filter out empty parts and very short ones
+    tokens = [p for p in parts if len(p) >= 2]
+    # Also include the original filename without extension for exact matching
+    basename = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    name_no_ext = basename.rsplit(".", 1)[0] if "." in basename else basename
+    if name_no_ext and name_no_ext not in tokens:
+        tokens.append(name_no_ext)
+    return " ".join(tokens)
+
+
 # ============================================================================
 # SEARCH INDEX
 # ============================================================================
@@ -264,9 +342,13 @@ class SearchIndex:
                 try:
                     content = md_file.read_text(encoding="utf-8", errors="replace")
                     rel_path = str(md_file.relative_to(docs_root.parent)).replace("\\", "/")
+                    # BM25F: boost path tokens via repetition for field weighting
+                    path_tokens = _path_to_tokens(rel_path)
+                    boosted_path = " ".join([path_tokens] * FIELD_WEIGHT_PATH) if path_tokens else ""
+                    searchable = f"{boosted_path}\n{content}" if boosted_path else content
                     documents.append({
                         "path": rel_path,
-                        "content": content,
+                        "content": searchable,
                         "outline": "",  # Markdown doesn't need outline
                         "mtime": md_file.stat().st_mtime,
                         "doc_type": "markdown"
@@ -312,19 +394,31 @@ class SearchIndex:
                         except Exception:
                             pass
 
-                    # If no outline, use first portion of content for indexing
+                    # Extract content fingerprint for better semantic matching
+                    fingerprint = _extract_content_fingerprint(code_file)
+
+                    # If no outline, use fingerprint + first portion of content
                     if not outline:
                         try:
-                            content = code_file.read_text(encoding="utf-8", errors="replace")
-                            # Use first 2000 chars for search indexing
-                            outline = content[:2000]
+                            raw = code_file.read_text(encoding="utf-8", errors="replace")
+                            outline = raw[:2000]
                         except Exception:
                             continue
 
-                    if outline:
+                    if outline or fingerprint:
+                        # BM25F: boost path + fingerprint tokens via repetition
+                        path_tokens = _path_to_tokens(rel_path)
+                        content_parts = []
+                        if path_tokens:
+                            content_parts.append(" ".join([path_tokens] * FIELD_WEIGHT_PATH))
+                        if fingerprint:
+                            content_parts.append(" ".join([fingerprint] * FIELD_WEIGHT_FINGERPRINT))
+                        if outline:
+                            content_parts.append(outline)
+                        searchable = "\n".join(content_parts)
                         documents.append({
                             "path": rel_path,
-                            "content": outline,
+                            "content": searchable,
                             "outline": outline,
                             "mtime": code_file.stat().st_mtime,
                             "doc_type": "code"
@@ -371,10 +465,13 @@ class SearchIndex:
                         current_mtime = md_file.stat().st_mtime
                         if rel_path not in existing or existing[rel_path] < current_mtime:
                             content = md_file.read_text(encoding="utf-8", errors="replace")
+                            path_tokens = _path_to_tokens(rel_path)
+                            boosted_path = " ".join([path_tokens] * FIELD_WEIGHT_PATH) if path_tokens else ""
+                            searchable = f"{boosted_path}\n{content}" if boosted_path else content
                             conn.execute("""
                                 INSERT OR REPLACE INTO documents (path, content, outline, mtime, doc_type, indexed_at)
                                 VALUES (?, ?, ?, ?, ?, ?)
-                            """, (rel_path, content, "", current_mtime, "markdown", datetime.now().isoformat()))
+                            """, (rel_path, searchable, "", current_mtime, "markdown", datetime.now().isoformat()))
                             updated += 1
                     except Exception:
                         continue
@@ -417,10 +514,20 @@ class SearchIndex:
                                 outline = content[:2000]
 
                             if outline:
+                                path_tokens = _path_to_tokens(rel_path)
+                                fingerprint = _extract_content_fingerprint(code_file)
+                                # BM25F: boost path and fingerprint tokens via repetition
+                                content_parts = []
+                                if path_tokens:
+                                    content_parts.append(" ".join([path_tokens] * FIELD_WEIGHT_PATH))
+                                if fingerprint:
+                                    content_parts.append(" ".join([fingerprint] * FIELD_WEIGHT_FINGERPRINT))
+                                content_parts.append(outline)
+                                searchable = "\n".join(content_parts)
                                 conn.execute("""
                                     INSERT OR REPLACE INTO documents (path, content, outline, mtime, doc_type, indexed_at)
                                     VALUES (?, ?, ?, ?, ?, ?)
-                                """, (rel_path, outline, outline, current_mtime, "code", datetime.now().isoformat()))
+                                """, (rel_path, searchable, outline, current_mtime, "code", datetime.now().isoformat()))
                                 updated += 1
                     except Exception:
                         continue
@@ -476,7 +583,7 @@ class SearchIndex:
         if self._bm25 is None and self._tfidf is None:
             self._rebuild_memory_index()
 
-        # Phase 1: BM25/TF-IDF sparse retrieval
+        # Phase 1: BM25/TF-IDF sparse retrieval (wide pool for semantic reranking)
         candidates = self._bm25_search(prompt, top_k=20)
         if not candidates:
             return []
@@ -553,6 +660,7 @@ class SearchIndex:
             norm_bm25 = {p: s / bm25_max for p, s in bm25_scores.items()}
 
             # Combine scores: 0.6 * bm25 + 0.4 * semantic
+            # BM25 gets more weight for exact keyword matching
             combined = []
             for i, path in enumerate(valid_paths):
                 bm25_s = norm_bm25.get(path, 0.0)
@@ -566,6 +674,11 @@ class SearchIndex:
         except Exception as e:
             print(f"[indexer] Semantic rerank failed: {e}", file=sys.stderr)
             return candidates[:top_k]
+
+    def get_all_paths(self) -> list[str]:
+        """Return all indexed file paths."""
+        with sqlite3.connect(self.db_path) as conn:
+            return [row[0] for row in conn.execute("SELECT path FROM documents")]
 
     def status(self) -> dict:
         """Return index status."""

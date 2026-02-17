@@ -8,7 +8,6 @@ bleed, and outputs a compact efficiency dashboard.
 Hook: SessionStart
 """
 import json
-import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -67,6 +66,12 @@ def detect_project_switch():
             for key in attn.get("scores", {}):
                 attn["scores"][key] = 0.0
             attn["turn_count"] = 0
+            attn["consecutive_turns"] = {}
+            attn["prompt_history"] = []
+            attn["warmup_applied"] = False
+            attn["import_graph"] = {}
+            attn["import_graph_reverse"] = {}
+            attn["cochange_graph"] = {}
             # Use atomic write if available
             try:
                 from attnroute.compat import safe_atomic_write
@@ -113,6 +118,33 @@ def detect_project_switch():
                     pass
         except Exception:
             pass
+
+    # Cross-session memory: load project profile for richer warm-start
+    try:
+        from attnroute.project_profile import get_warm_start_scores
+        profile_scores = get_warm_start_scores(current)
+        if profile_scores:
+            attn_file = ATTN_STATE_PROJECT
+            try:
+                attn = json.loads(attn_file.read_text(encoding='utf-8'))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                attn = {"scores": {}, "consecutive_turns": {}, "turn_count": 0}
+            applied_profile = 0
+            for f, score in profile_scores.items():
+                current_score = attn.get("scores", {}).get(f, 0)
+                if score > current_score:
+                    attn.setdefault("scores", {})[f] = score
+                    attn.setdefault("consecutive_turns", {})[f] = 0
+                    applied_profile += 1
+            if applied_profile:
+                try:
+                    from attnroute.compat import safe_atomic_write
+                    safe_atomic_write(attn_file, json.dumps(attn, indent=2))
+                except ImportError:
+                    attn_file.write_text(json.dumps(attn, indent=2), encoding='utf-8')
+                print(f"[attnroute] Profile warm-start: {applied_profile} files from cross-session memory", file=sys.stderr)
+    except Exception:
+        pass
 
 
 def build_dashboard() -> str:

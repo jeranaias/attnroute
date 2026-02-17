@@ -1607,3 +1607,334 @@ class TestBillingAudit:
         assert "claude-opus-4-5-20251101" in audit["models"]
         assert audit["models"]["claude-opus-4-6"]["requests"] == 1
         assert audit["models"]["claude-opus-4-5-20251101"]["requests"] == 1
+
+
+# ------------------------------------------------------------------ #
+#  Session baseline tracking                                          #
+# ------------------------------------------------------------------ #
+
+class TestSessionBaseline:
+    """Test that session baseline tracks per-session token consumption."""
+
+    def test_baseline_stored_on_session_start(self, plugin, mock_project):
+        """on_session_start saves current window tokens as baseline."""
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=30, request_id="req_pre",
+                             input_tokens=5000, output_tokens=1000,
+                             cache_creation=2000, cache_read=500),
+        ])
+
+        plugin.on_session_start({"session_id": "s1"})
+        state = plugin.load_state()
+
+        # Baseline should capture pre-existing window tokens
+        assert state["baseline_window_tokens"] > 0
+        assert state["baseline_api_calls"] > 0
+
+    def test_session_tokens_in_summary(self, plugin, mock_project):
+        """get_session_summary returns session-level delta."""
+        # Pre-existing usage
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=60, request_id="req_pre",
+                             input_tokens=5000, output_tokens=1000,
+                             cache_creation=2000, cache_read=500),
+        ])
+
+        plugin.on_session_start({"session_id": "s1"})
+
+        # Add more usage after session start
+        _write_jsonl(mock_project / "session2.jsonl", [
+            _assistant_entry(minutes_ago=2, request_id="req_new",
+                             input_tokens=1000, output_tokens=500,
+                             cache_creation=200, cache_read=100),
+        ])
+
+        # Clear cache so it rescans
+        plugin._cache_time = None
+
+        summary = plugin.get_session_summary()
+
+        assert "session_tokens" in summary
+        assert "session_api_calls" in summary
+        assert summary["session_tokens"] >= 0
+        assert summary["session_api_calls"] >= 0
+
+    def test_session_tokens_zero_at_start(self, plugin, mock_project):
+        """Immediately after session start, session_tokens should be 0."""
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=10, request_id="req_001",
+                             input_tokens=100, output_tokens=50,
+                             cache_creation=200),
+        ])
+
+        plugin.on_session_start({"session_id": "s1"})
+        summary = plugin.get_session_summary()
+
+        assert summary["session_tokens"] == 0
+        assert summary["session_api_calls"] == 0
+
+
+# ------------------------------------------------------------------ #
+#  v1.0: Budget configuration                                        #
+# ------------------------------------------------------------------ #
+
+class TestBudgetConfig:
+    """Test budget loading from config file."""
+
+    def test_load_budget_config_defaults(self, plugin, tmp_path):
+        """No config file → (0, 0) defaults (budgets disabled)."""
+        daily, weekly = plugin._load_budget_config()
+        assert daily == 0
+        assert weekly == 0
+
+    def test_load_budget_config_values(self, plugin, tmp_path):
+        """Valid config returns configured budgets."""
+        config_dir = tmp_path / "plugins"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "config.json"
+        config_file.write_text(json.dumps({
+            "burnrate": {"daily_budget": 50000, "weekly_budget": 250000}
+        }), encoding="utf-8")
+
+        daily, weekly = plugin._load_budget_config()
+        assert daily == 50000
+        assert weekly == 250000
+
+    def test_load_budget_config_partial(self, plugin, tmp_path):
+        """Config with only daily_budget returns (daily, 0)."""
+        config_dir = tmp_path / "plugins"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "config.json"
+        config_file.write_text(json.dumps({
+            "burnrate": {"daily_budget": 30000}
+        }), encoding="utf-8")
+
+        daily, weekly = plugin._load_budget_config()
+        assert daily == 30000
+        assert weekly == 0
+
+    def test_load_budget_config_bad_json(self, plugin, tmp_path):
+        """Corrupt config file → defaults."""
+        config_dir = tmp_path / "plugins"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "config.json"
+        config_file.write_text("not valid json{{{", encoding="utf-8")
+
+        daily, weekly = plugin._load_budget_config()
+        assert daily == 0
+        assert weekly == 0
+
+    def test_load_budget_config_negative_values(self, plugin, tmp_path):
+        """Negative values clamped to 0."""
+        config_dir = tmp_path / "plugins"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "config.json"
+        config_file.write_text(json.dumps({
+            "burnrate": {"daily_budget": -1000, "weekly_budget": -5000}
+        }), encoding="utf-8")
+
+        daily, weekly = plugin._load_budget_config()
+        assert daily == 0
+        assert weekly == 0
+
+
+# ------------------------------------------------------------------ #
+#  v1.0: Budget usage computation                                    #
+# ------------------------------------------------------------------ #
+
+class TestBudgetUsage:
+    """Test budget usage computation."""
+
+    def test_compute_budget_usage_daily_vs_weekly(self, plugin, mock_project):
+        """Daily usage only counts today's records, weekly counts all."""
+        now = datetime.now(timezone.utc)
+
+        # Today's records
+        today_entry = json.dumps({
+            "type": "assistant",
+            "timestamp": now.isoformat(),
+            "requestId": "req_today",
+            "sessionId": "s1",
+            "message": {
+                "model": "claude-opus-4-6",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 100,
+                },
+            },
+        })
+
+        # 3 days ago
+        old_ts = (now - timedelta(days=3)).isoformat()
+        old_entry = json.dumps({
+            "type": "assistant",
+            "timestamp": old_ts,
+            "requestId": "req_old",
+            "sessionId": "s1",
+            "message": {
+                "model": "claude-opus-4-6",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 2000,
+                    "output_tokens": 1000,
+                    "cache_creation_input_tokens": 500,
+                    "cache_read_input_tokens": 0,
+                },
+            },
+        })
+
+        _write_jsonl(mock_project / "session.jsonl", [today_entry, old_entry])
+
+        daily, weekly = plugin._compute_budget_usage()
+        # Daily: only today's billable (1000 + 500 + 200) = 1700
+        assert daily == 1700
+        # Weekly: both records billable (1700 + 3500) = 5200
+        assert weekly == 5200
+
+
+# ------------------------------------------------------------------ #
+#  v1.0: Budget alerts in on_prompt_post                             #
+# ------------------------------------------------------------------ #
+
+class TestBudgetAlerts:
+    """Test budget alerts in context injection."""
+
+    def test_budget_warning_at_threshold(self, plugin, mock_project, monkeypatch):
+        """Budget at >= 80% triggers warning."""
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=5, request_id="req_001",
+                             input_tokens=100, output_tokens=50),
+        ])
+
+        plugin.on_session_start({})
+
+        # Mock budget config: daily=200, so 150 used = 75% (under threshold)
+        # But let's set it to 180 so 150/180 = 83%
+        monkeypatch.setattr(plugin, "_load_budget_config", lambda: (200, 0))
+        monkeypatch.setattr(plugin, "_compute_budget_usage", lambda: (170, 170))
+
+        context = plugin.on_prompt_post("test", "", {})
+        assert "Budget" in context
+        assert "170" in context
+
+    def test_no_budget_warning_when_disabled(self, plugin, mock_project, monkeypatch):
+        """No budget warnings when budgets are 0 (disabled)."""
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=5, request_id="req_001",
+                             input_tokens=100, output_tokens=50),
+        ])
+
+        plugin.on_session_start({})
+        monkeypatch.setattr(plugin, "_load_budget_config", lambda: (0, 0))
+
+        context = plugin.on_prompt_post("test", "", {})
+        assert "Budget" not in context
+
+    def test_budget_warning_below_threshold(self, plugin, mock_project, monkeypatch):
+        """Budget at < 80% should not trigger warning."""
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=5, request_id="req_001",
+                             input_tokens=100, output_tokens=50),
+        ])
+
+        plugin.on_session_start({})
+        monkeypatch.setattr(plugin, "_load_budget_config", lambda: (10000, 0))
+        monkeypatch.setattr(plugin, "_compute_budget_usage", lambda: (5000, 5000))
+
+        context = plugin.on_prompt_post("test", "", {})
+        # 5000/10000 = 50% < 80%
+        assert "Budget" not in context
+
+
+# ------------------------------------------------------------------ #
+#  v1.0: Export usage                                                #
+# ------------------------------------------------------------------ #
+
+class TestExportUsage:
+    """Test export_usage for CSV and JSON output."""
+
+    def test_export_json(self, plugin, mock_project):
+        """JSON export contains correct structure."""
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=5, request_id="req_001",
+                             input_tokens=100, output_tokens=50),
+        ])
+
+        output = plugin.export_usage(format="json", days=1)
+        parsed = json.loads(output)
+
+        assert "exported_at" in parsed
+        assert parsed["days"] == 1
+        assert len(parsed["records"]) == 1
+        assert parsed["records"][0]["input_tokens"] == 100
+
+    def test_export_csv(self, plugin, mock_project):
+        """CSV export has header and data rows."""
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=5, request_id="req_001",
+                             input_tokens=100, output_tokens=50),
+        ])
+
+        output = plugin.export_usage(format="csv", days=1)
+        lines = output.strip().split("\n")
+
+        assert lines[0].startswith("timestamp,model,project")
+        assert len(lines) == 2  # header + 1 data row
+        assert "100" in lines[1]  # input_tokens
+
+    def test_export_unknown_format_raises(self, plugin):
+        """Unknown format raises ValueError."""
+        with pytest.raises(ValueError, match="Unknown format"):
+            plugin.export_usage(format="xml")
+
+
+# ------------------------------------------------------------------ #
+#  v1.0: Weekly summary                                              #
+# ------------------------------------------------------------------ #
+
+class TestWeeklySummary:
+    """Test weekly summary computation in on_stop."""
+
+    def test_weekly_summary_stored(self, plugin, mock_project):
+        """on_stop stores weekly summary once per day."""
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=30, request_id="req_001",
+                             input_tokens=1000, output_tokens=500),
+            _assistant_entry(minutes_ago=15, request_id="req_002",
+                             input_tokens=2000, output_tokens=1000),
+        ])
+
+        plugin.on_session_start({})
+        plugin.on_stop([], {})
+
+        state = plugin.load_state()
+        assert "weekly_summary" in state
+        summary = state["weekly_summary"]
+        assert "date" in summary
+        assert summary["tokens"] > 0
+        assert "by_model" in summary
+        assert summary["api_calls"] > 0
+
+    def test_weekly_summary_not_repeated_same_day(self, plugin, mock_project):
+        """Weekly summary only computed once per day."""
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=5, request_id="req_001",
+                             input_tokens=100, output_tokens=50),
+        ])
+
+        plugin.on_session_start({})
+        plugin.on_stop([], {})
+
+        state = plugin.load_state()
+        summary1 = state.get("weekly_summary", {}).get("tokens", 0)
+        last_update = state.get("last_weekly_update", "")
+
+        # Second call same day — should not re-compute
+        plugin.on_stop([], {})
+        state = plugin.load_state()
+        assert state.get("last_weekly_update") == last_update

@@ -35,6 +35,7 @@ class AttnroutePlugin(ABC):
         validate_plugin_name(self.name)
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._state_file = self._state_dir / f"{self.name}_state.json"
+        self._enabled_cache: bool | None = None
 
     def load_state(self) -> dict:
         """Load plugin-specific state from disk (TOCTOU-safe)."""
@@ -114,17 +115,28 @@ class AttnroutePlugin(ABC):
         return None
 
     def is_enabled(self) -> bool:
-        """Check if this plugin is enabled in config (TOCTOU-safe)."""
+        """Check if this plugin is enabled in config.
+
+        Caches result after first read to avoid repeated disk I/O.
+        Cache is invalidated on session start (new plugin instance).
+        """
+        if self._enabled_cache is not None:
+            return self._enabled_cache
+
         config_file = Path.home() / ".claude" / "plugins" / "config.json"
         try:
             config = json.loads(config_file.read_text(encoding="utf-8"))
             # Type validation: ensure we get a dict
             if not isinstance(config, dict):
+                self._enabled_cache = True
                 return True
             enabled = config.get("enabled", {})
             if not isinstance(enabled, dict):
+                self._enabled_cache = True
                 return True
-            return enabled.get(self.name, True)
+            self._enabled_cache = enabled.get(self.name, True)
+            return self._enabled_cache
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
+        self._enabled_cache = True
         return True  # Enabled by default if config missing

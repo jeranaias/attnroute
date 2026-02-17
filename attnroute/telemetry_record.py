@@ -115,69 +115,106 @@ def resolve_transcript_path(raw_path: str) -> Path:
     return Path(raw_path)
 
 
-def extract_tool_calls_from_transcript(transcript_path: str) -> list:
-    """
-    Parse transcript JSONL for tool calls in the LAST assistant turn.
-    Returns list of {tool, target} dicts.
-    """
+def _read_transcript_tail(transcript_path: str) -> list[str]:
+    """Read the last 200KB of a transcript JSONL file as lines."""
     resolved = resolve_transcript_path(transcript_path)
     if not resolved.name or not resolved.exists():
         return []
 
-    tool_calls = []
     try:
-        # Read only last 200KB to avoid loading huge transcripts
         file_size = resolved.stat().st_size
         with open(resolved, encoding='utf-8', errors='replace') as f:
             if file_size > 200_000:
                 f.seek(max(0, file_size - 200_000))
                 f.readline()  # Skip partial line
-            lines = f.readlines()
-
-        # Find last assistant message with tool_use blocks
-        for line in reversed(lines):
-            try:
-                entry = json.loads(line)
-                role = entry.get("role") or entry.get("type", "")
-                if role != "assistant":
-                    continue
-
-                content = entry.get("message", {}).get("content", [])
-                if not content:
-                    content = entry.get("content", [])
-                if not isinstance(content, list):
-                    continue
-
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") != "tool_use":
-                        continue
-
-                    tool_name = block.get("name", "")
-                    tool_input = block.get("input", {})
-
-                    target = (
-                        tool_input.get("file_path") or
-                        tool_input.get("path") or
-                        tool_input.get("pattern") or
-                        tool_input.get("command", "")[:100] or
-                        ""
-                    )
-
-                    tool_calls.append({
-                        "tool": tool_name,
-                        "target": str(target),
-                    })
-
-                if tool_calls:
-                    break
-            except json.JSONDecodeError:
-                continue
+            return f.readlines()
     except Exception:
-        pass
+        return []
 
-    return tool_calls
+
+def _find_last_assistant_tool_blocks(lines: list[str]) -> list[tuple[str, dict]]:
+    """Find tool_use blocks from the last assistant turn.
+
+    Returns list of (tool_name, tool_input_dict) tuples.
+    """
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+            role = entry.get("role") or entry.get("type", "")
+            if role != "assistant":
+                continue
+
+            content = entry.get("message", {}).get("content", [])
+            if not content:
+                content = entry.get("content", [])
+            if not isinstance(content, list):
+                continue
+
+            blocks = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_use":
+                    continue
+                tool_name = block.get("name", "")
+                tool_input = block.get("input", {})
+                if not isinstance(tool_input, dict):
+                    tool_input = {}
+                blocks.append((tool_name, tool_input))
+
+            if blocks:
+                return blocks
+        except json.JSONDecodeError:
+            continue
+    return []
+
+
+def _extract_target(tool_input: dict) -> str:
+    """Extract the primary target path/command from a tool input dict."""
+    return str(
+        tool_input.get("file_path") or
+        tool_input.get("path") or
+        tool_input.get("pattern") or
+        tool_input.get("command", "")[:100] or
+        ""
+    )
+
+
+def extract_tool_calls_from_transcript(transcript_path: str) -> list:
+    """
+    Parse transcript JSONL for tool calls in the LAST assistant turn.
+    Returns list of {tool, target} dicts (legacy format).
+    """
+    lines = _read_transcript_tail(transcript_path)
+    blocks = _find_last_assistant_tool_blocks(lines)
+
+    return [
+        {"tool": name, "target": _extract_target(inp)}
+        for name, inp in blocks
+    ]
+
+
+def extract_rich_tool_calls_from_transcript(transcript_path: str) -> list:
+    """
+    Parse transcript JSONL for tool calls in the LAST assistant turn.
+    Returns list of dicts with full input preserved:
+    {tool, target, input: {file_path, old_string, new_string, command, ...}}
+
+    This enriched format lets plugins like VerifyFirst and LoopBreaker
+    make content-aware decisions (e.g. distinguish different edits to the
+    same file, detect stale reads, track error patterns).
+    """
+    lines = _read_transcript_tail(transcript_path)
+    blocks = _find_last_assistant_tool_blocks(lines)
+
+    results = []
+    for name, inp in blocks:
+        results.append({
+            "tool": name,
+            "target": _extract_target(inp),
+            "input": inp,
+        })
+    return results
 
 
 def compute_files_used(tool_calls: list, files_injected: list, project_path: str) -> list:
@@ -494,15 +531,16 @@ def main():
     if hook_input.get("stop_hook_active"):
         return
 
-    # Extract tool calls from transcript
-    tool_calls = extract_tool_calls_from_transcript(transcript_path)
+    # Extract tool calls from transcript (rich format for plugins, legacy for telemetry)
+    rich_tool_calls = extract_rich_tool_calls_from_transcript(transcript_path)
+    tool_calls = [{"tool": tc["tool"], "target": tc["target"]} for tc in rich_tool_calls]
 
     # === PLUGIN: on_stop ===
     if PLUGINS_AVAILABLE:
         session_state = load_session_state()
         for plugin in get_plugins():
             try:
-                warning = plugin.on_stop(tool_calls, session_state)
+                warning = plugin.on_stop(rich_tool_calls, session_state)
                 if warning:
                     print(warning, file=sys.stderr)
             except Exception as e:
@@ -569,6 +607,26 @@ def main():
         except Exception:
             pass
 
+    # Wire observe_tool_calls: update attention state with actual file access
+    if rich_tool_calls:
+        try:
+            from attnroute.context_router import (
+                get_state_file,
+                load_state,
+                observe_tool_calls,
+                save_state,
+            )
+            state_file = get_state_file()
+            attn_state = load_state(state_file)
+            obs_calls = [
+                {"name": tc["tool"], "input": tc.get("input", {})}
+                for tc in rich_tool_calls
+            ]
+            attn_state = observe_tool_calls(attn_state, obs_calls, project)
+            save_state(state_file, attn_state)
+        except Exception as e:
+            print(f"[attnroute] observe_tool_calls failed: {e}", file=sys.stderr)
+
     # Save session memory for warm-start continuity
     if LEARNER_AVAILABLE:
         try:
@@ -586,6 +644,18 @@ def main():
                     learner.save_session(scores)
         except Exception:
             pass
+
+    # Update cross-session project profile
+    try:
+        from attnroute.project_profile import update_profile_from_session
+        from attnroute.telemetry_lib import ATTN_STATE_PROJECT
+        try:
+            attn = json.loads(ATTN_STATE_PROJECT.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            attn = {"scores": {}}
+        update_profile_from_session(project, attn, tool_calls)
+    except Exception as e:
+        print(f"[attnroute] Profile update failed: {e}", file=sys.stderr)
 
     # Rotate turns.jsonl to prevent unbounded growth
     rotate_jsonl(TURNS_FILE, 500)

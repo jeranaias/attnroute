@@ -30,9 +30,10 @@ import sys
 from pathlib import Path
 
 # Fix Windows encoding (cp1252 can't handle Unicode box-drawing/emoji chars)
-if sys.stdout.encoding != 'utf-8':
+# Guard against double-wrapping if module is imported multiple times
+if sys.stdout.encoding != 'utf-8' and not isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-if sys.stderr.encoding != 'utf-8':
+if sys.stderr.encoding != 'utf-8' and not isinstance(sys.stderr, io.TextIOWrapper):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 import re
 from datetime import datetime
@@ -328,10 +329,14 @@ TRANSITIVE_COACT_BOOST = 0.15  # 2-hop co-activation boost (A→B→C)
 SEMANTIC_BOOST_WEIGHT = 0.8    # Weight for semantic search results
 
 # Limits (prevent context explosion) - TIGHTENED for lower waste
-MAX_HOT_FILES = 3           # Reduced from 4 - be more selective
-MAX_WARM_FILES = 5          # Reduced from 8 - focus on truly relevant
+MAX_HOT_FILES = 3           # Max full-file injection slots
+MAX_WARM_FILES = 8          # WARM headers are cheap (~50 tokens each), allow more
+# Adaptive injection: only HOT when truly confident, otherwise downgrade to WARM
+# This saves ~450 tokens per demoted file (500 full → 50 TOC)
+CONFIDENT_HOT_THRESHOLD = 0.90   # Score must be this high for HOT injection
+CONFIDENT_HOT_MIN_STREAK = 2     # OR: file must be warm for this many consecutive turns
 WARM_HEADER_LINES = 25      # Lines to extract for warm context
-MAX_TOTAL_CHARS = 20000     # Reduced from 25000 - tighter context
+MAX_TOTAL_CHARS = 22000     # Balance between coverage and cost
 
 # Confidence thresholds for smarter selection
 MIN_SEMANTIC_SCORE = 0.15   # Minimum semantic relevance to consider
@@ -340,7 +345,7 @@ SELECTION_CONFIDENCE = 0.6  # Files below this confidence are demoted
 
 # Keyword matching thresholds
 SHORT_KEYWORD_LENGTH = 4    # Keywords <= this length require word boundaries to avoid false positives
-SEMANTIC_SEARCH_TOP_K = 6   # Number of semantic search results to retrieve (reduced for selectivity)
+SEMANTIC_SEARCH_TOP_K = 6   # Number of semantic search results to retrieve
 
 # Score adjustment factors
 PINNED_FILE_FLOOR_BOOST = 0.1      # Extra boost above WARM_THRESHOLD for pinned files
@@ -382,6 +387,11 @@ SOURCE_INDEXING_ENABLED = True
 SOURCE_MAX_HOT_FILES = 2           # Max source files to inject as HOT
 SOURCE_MAX_WARM_FILES = 3          # Max source files to inject as WARM
 SOURCE_MAX_CHARS = 8000            # Max total chars for source context
+
+# HINT tier: path-only file suggestions (~5 tokens each, very cheap)
+# Includes overflow WARM files that didn't fit in core selection
+HINT_MAX_FILES = 20                # Max HINT files to inject
+HINT_THRESHOLD = 0.15              # Score threshold for HINT tier (below WARM)
 
 # Source file size limit (skip large generated/minified files)
 SOURCE_MAX_FILE_SIZE = 100_000     # 100KB - skip files larger than this
@@ -713,6 +723,212 @@ def _keyword_activate(state: dict, prompt_lower: str, directly_activated: set[st
                 directly_activated.add(path)
 
 
+def _extract_file_refs(prompt: str) -> list[str]:
+    """Extract potential file references from a prompt.
+
+    Finds explicit filenames (e.g., 'context_router.py', 'src/models.py')
+    and snake_case identifiers that might match filenames.
+    """
+    refs = []
+    # Explicit filenames with extensions
+    refs += re.findall(
+        r'[\w./\\-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|c|cpp|h|rb|php|swift|kt|md|json|yaml|yml|toml)',
+        prompt
+    )
+    # snake_case identifiers (e.g., "context_router", "session_replay")
+    refs += re.findall(r'\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,}\b', prompt)
+    # CamelCase identifiers → convert to snake_case for matching
+    # (e.g., "FilePredictor" → "file_predictor" matches predictor.py)
+    camel_matches = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b', prompt)
+    for cm in camel_matches:
+        snake = re.sub(r'([A-Z])', r'_\1', cm).lower().lstrip('_')
+        refs.append(snake)
+    return refs
+
+
+# Continuation prompt detection
+_CONTINUATION_WORDS = {
+    "yes", "yep", "yeah", "ok", "okay", "sure", "go", "do", "continue",
+    "proceed", "agreed", "correct", "right", "exactly", "perfect",
+    "awesome", "great", "good", "nice", "cool", "fine", "thanks",
+    "dude", "love", "both", "all", "apply", "ship", "send", "run",
+    "sorry", "please", "ahead", "hell", "fuck", "damn", "shit",
+    "make", "it", "them", "that", "this", "the", "lgtm", "sweet",
+    "keep", "going", "beautiful", "thorough", "just", "now",
+}
+_MAX_CONTINUATION_LENGTH = 60  # Prompts shorter than this may be continuations
+
+
+def _is_continuation_prompt(prompt: str) -> bool:
+    """Detect if a prompt is a short continuation/approval of prior context."""
+    stripped = prompt.strip().rstrip(".!?,")
+    if len(stripped) > _MAX_CONTINUATION_LENGTH:
+        return False
+    words = set(re.findall(r'[a-z]+', stripped.lower()))
+    # If most words are continuation words, it's a follow-up
+    if not words:
+        return True
+    continuation_ratio = len(words & _CONTINUATION_WORDS) / len(words)
+    return continuation_ratio >= 0.5
+
+
+def _build_effective_prompt(prompt: str, history: list[str]) -> str:
+    """Build an enriched prompt by prepending context from prior turns.
+
+    For continuation prompts ("yes go ahead", "fix them"), BM25 needs
+    the context from what was previously discussed.
+    """
+    if not history:
+        return prompt
+    if not _is_continuation_prompt(prompt):
+        return prompt
+    # Prepend last 1-2 substantial prompts (skip other continuations)
+    context_parts = []
+    for prev in reversed(history):
+        if not _is_continuation_prompt(prev) and len(prev) > 20:
+            context_parts.append(prev)
+            if len(context_parts) >= 2:
+                break
+    if not context_parts:
+        return prompt
+    context = " ".join(reversed(context_parts))
+    return f"{context} {prompt}"
+
+
+def _activate_by_filename(state: dict, prompt: str, directly_activated: set[str]):
+    """Activate files that are directly referenced by name in the prompt."""
+    file_refs = _extract_file_refs(prompt)
+    if not file_refs:
+        return
+
+    idx = get_search_index()
+    if idx is None:
+        return
+
+    try:
+        all_paths = idx.get_all_paths()
+    except Exception:
+        return
+
+    for ref in file_refs:
+        ref_lower = ref.lower().replace("\\", "/")
+        ref_basename = Path(ref_lower).name
+
+        for path in all_paths:
+            path_lower = path.lower()
+            path_basename = Path(path_lower).name
+
+            # Exact basename match (e.g., "context_router.py" → "context_router.py")
+            if ref_basename and path_basename == ref_basename:
+                state.setdefault("scores", {})[path] = max(state["scores"].get(path, 0), KEYWORD_BOOST)
+                state.setdefault("consecutive_turns", {})[path] = state.get("consecutive_turns", {}).get(path, 0)
+                directly_activated.add(path)
+                continue
+
+            # Name without extension match (e.g., "context_router" → "context_router.py")
+            ref_stem = ref_lower.rsplit(".", 1)[0] if "." in ref_lower else ref_lower
+            path_stem = path_lower.rsplit(".", 1)[0] if "." in path_lower else path_lower
+            if ref_stem and (path_stem.endswith("/" + ref_stem) or path_stem == ref_stem):
+                state.setdefault("scores", {})[path] = max(state["scores"].get(path, 0), KEYWORD_BOOST)
+                state.setdefault("consecutive_turns", {})[path] = state.get("consecutive_turns", {}).get(path, 0)
+                directly_activated.add(path)
+
+
+def observe_tool_calls(state: dict, tool_calls: list[dict],
+                       project_dir: str = None) -> dict:
+    """Update attention state based on files Claude actually accessed.
+
+    Called after Claude finishes responding. Boosts accessed files
+    and learns co-access patterns for future predictions.
+
+    Args:
+        state: Current attention state
+        tool_calls: List of tool call dicts with 'name' and 'input' keys
+        project_dir: Project root for path normalization (optional)
+
+    Returns:
+        Updated state dict
+    """
+    accessed_files = set()
+    cwd = project_dir or str(Path.cwd())
+    cwd_normalized = cwd.replace("\\", "/").rstrip("/")
+
+    for tc in tool_calls:
+        tool_name = tc.get("name", "")
+        tool_input = tc.get("input", {})
+
+        # Extract file path and determine signal strength
+        file_path = None
+        boost = 0.7  # Default: strong signal (Read/Edit/Write)
+        if tool_name in ("Read", "Edit", "Write", "MultiEdit"):
+            file_path = tool_input.get("file_path")
+            boost = 0.75  # Direct file access — strongest signal
+        elif tool_name in ("Grep", "grep"):
+            file_path = tool_input.get("path")
+            boost = 0.4  # Directory search — moderate signal (searching, not reading)
+        elif tool_name in ("Glob", "glob"):
+            file_path = tool_input.get("path")
+            boost = 0.3  # File pattern search — weaker signal
+
+        if file_path:
+            # Normalize to forward slashes and make relative to project
+            rel = file_path.replace("\\", "/")
+            if rel.lower().startswith(cwd_normalized.lower()):
+                rel = rel[len(cwd_normalized):].lstrip("/")
+            # Remove drive letter on Windows
+            if len(rel) > 2 and rel[1] == ":":
+                rel = rel[2:].lstrip("/")
+
+            accessed_files.add(rel)
+            state.setdefault("scores", {})[rel] = max(state["scores"].get(rel, 0), boost)
+            if boost >= 0.7:  # Only count direct access for streak tracking
+                state.setdefault("consecutive_turns", {})[rel] = (
+                    state.get("consecutive_turns", {}).get(rel, 0) + 1
+                )
+
+    # Learn co-access: files used together get co-activation edges
+    accessed_list = list(accessed_files)
+    for i, a in enumerate(accessed_list):
+        for b in accessed_list[i + 1:]:
+            if a in CO_ACTIVATION:
+                if b not in CO_ACTIVATION[a]:
+                    CO_ACTIVATION[a].append(b)
+            else:
+                CO_ACTIVATION[a] = [b]
+            if b in CO_ACTIVATION:
+                if a not in CO_ACTIVATION[b]:
+                    CO_ACTIVATION[b].append(a)
+            else:
+                CO_ACTIVATION[b] = [a]
+
+    # Persist co-access edges through the learner (fixes silent data loss bug)
+    if len(accessed_list) >= 2 and LEARNER_AVAILABLE:
+        try:
+            learner = get_learner()
+            if learner is not None:
+                learned_coact = learner.state.get("coactivation_learned", {})
+                changed = False
+                for i, a in enumerate(accessed_list):
+                    for b in accessed_list[i + 1:]:
+                        if a not in learned_coact:
+                            learned_coact[a] = []
+                        if b not in learned_coact[a]:
+                            learned_coact[a].append(b)
+                            changed = True
+                        if b not in learned_coact:
+                            learned_coact[b] = []
+                        if a not in learned_coact[b]:
+                            learned_coact[b].append(a)
+                            changed = True
+                if changed:
+                    learner.state["coactivation_learned"] = learned_coact
+                    learner._save()
+        except Exception:
+            pass  # Never crash the Stop hook
+
+    return state
+
+
 def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
     """
     Update attention scores based on prompt content.
@@ -720,6 +936,7 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
 
     Pipeline:
       1. Decay all scores
+      1.5. Direct filename activation from prompt
       2. Semantic search (if available) OR keyword activation (fallback)
       3. Learned association boost
       4. Co-activation boost (direct + transitive via graph)
@@ -731,7 +948,14 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
     if state.get("turn_count", 0) == 0:
         ensure_search_index_built()
 
-    prompt_lower = prompt.lower()
+    # Rolling prompt context: enrich short/continuation prompts
+    # with context from previous turns so BM25 has something to match
+    prompt_history = state.get("prompt_history", [])
+    effective_prompt = _build_effective_prompt(prompt, prompt_history)
+    prompt_history.append(prompt[:200])  # Cap stored length
+    state["prompt_history"] = prompt_history[-3:]  # Keep last 3
+
+    prompt_lower = effective_prompt.lower()
     directly_activated: set[str] = set()
 
     # Ensure consecutive_turns dict exists (backwards compat with old state files)
@@ -743,15 +967,21 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
         decay = get_decay_rate(path)
         state["scores"][path] *= decay
 
+    # Phase 1.5: Direct filename activation from prompt
+    _activate_by_filename(state, prompt, directly_activated)
+
     # Phase 2: Semantic search (if available) OR keyword activation
-    # Use semantic search with minimum score threshold for smarter selection
+    # Use effective_prompt (enriched with history for continuations)
+    # For continuation prompts, reduce BM25 influence so recency dominates
+    is_continuation = _is_continuation_prompt(prompt)
+    search_weight = SEMANTIC_BOOST_WEIGHT * (0.5 if is_continuation else 1.0)
     if SEARCH_AVAILABLE and get_search_index():
         try:
-            results = get_search_index().query(prompt, top_k=SEMANTIC_SEARCH_TOP_K)
+            results = get_search_index().query(effective_prompt, top_k=SEMANTIC_SEARCH_TOP_K)
             for path, relevance in results:
                 # Only activate if above minimum semantic score
                 if relevance >= MIN_SEMANTIC_SCORE:
-                    boost = min(1.0, relevance * SEMANTIC_BOOST_WEIGHT)
+                    boost = min(1.0, relevance * search_weight)
                     # If path is already in state, update if higher
                     if path in state["scores"]:
                         if boost > state["scores"][path]:
@@ -784,7 +1014,16 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
     if LEARNER_AVAILABLE:
         learner = get_learner()
         if learner is not None:
-            state["scores"] = learner.boost_scores(prompt, state["scores"])
+            state["scores"] = learner.boost_scores(effective_prompt, state["scores"])
+
+    # Phase 2.7: Intent-based boost (semantic intent shortcuts)
+    try:
+        from attnroute.intent_map import boost_by_intent, detect_intent
+        intents = detect_intent(effective_prompt)
+        if intents:
+            state["scores"] = boost_by_intent(intents, state["scores"], state)
+    except ImportError:
+        pass
 
     # Phase 3: Co-activation boost (direct neighbors)
     for activated_path in directly_activated:
@@ -803,6 +1042,87 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
                 # Only apply if file isn't already activated
                 if current < WARM_THRESHOLD:
                     state["scores"][path] = min(1.0, current + boost)
+
+    # Phase 3.6: Import graph boost
+    # Files that import/are imported by activated files get a boost.
+    # Built once on turn 0 and cached in state.
+    import_graph = state.get("import_graph")
+    if import_graph is None and state.get("turn_count", 0) == 0:
+        try:
+            from attnroute.warmup import _build_import_graph
+            import_graph = _build_import_graph(Path.cwd())
+            # Build reverse graph (importers of each file)
+            reverse_graph: dict[str, set[str]] = {}
+            for src, imports in import_graph.items():
+                for imp in imports:
+                    reverse_graph.setdefault(imp, set()).add(src)
+            state["import_graph"] = import_graph
+            state["import_graph_reverse"] = {k: list(v) for k, v in reverse_graph.items()}
+        except Exception:
+            state["import_graph"] = {}
+            state["import_graph_reverse"] = {}
+            import_graph = {}
+    if import_graph:
+        reverse = state.get("import_graph_reverse", {})
+        for activated_path in directly_activated:
+            # Boost files that the activated file imports
+            for imported in import_graph.get(activated_path, set()):
+                if imported in state["scores"]:
+                    current = state["scores"][imported]
+                    state["scores"][imported] = min(1.0, current + 0.15)
+            # Boost files that import the activated file
+            for importer in reverse.get(activated_path, []):
+                if importer in state["scores"]:
+                    current = state["scores"][importer]
+                    state["scores"][importer] = min(1.0, current + 0.10)
+
+    # Phase 3.7: Git co-change boost
+    # Files that are historically changed together get mutual boost
+    # Only boost partners that already have non-zero scores (evidence of relevance)
+    cochange = state.get("cochange_graph")
+    if cochange is None and state.get("turn_count", 0) == 0:
+        try:
+            from attnroute.warmup import build_cochange_graph
+            cochange = build_cochange_graph(Path.cwd(), max_commits=150)
+            state["cochange_graph"] = cochange
+        except Exception:
+            state["cochange_graph"] = {}
+            cochange = {}
+    if cochange:
+        for activated_path in directly_activated:
+            partners = cochange.get(activated_path, [])
+            for partner, strength in partners:
+                current = state["scores"].get(partner, 0)
+                # Only boost files that already have some signal (non-zero score)
+                if current > 0.01:
+                    boost = min(0.2, strength * 0.25)
+                    state["scores"][partner] = min(
+                        1.0, current + boost
+                    )
+
+    # Phase 3.8: Test-source pairing
+    # When a source file is activated, boost its test file and vice versa
+    # Pre-build name→path lookup for O(1) matching instead of O(n) per file
+    _name_to_path: dict[str, str] = {}
+    for _p in state["scores"]:
+        _n = Path(_p).name
+        if _n not in _name_to_path:
+            _name_to_path[_n] = _p
+
+    for activated_path in directly_activated:
+        basename = Path(activated_path).stem
+        ext = Path(activated_path).suffix
+        if not ext:
+            continue
+        if basename.startswith("test_"):
+            target_name = basename[5:] + ext
+        else:
+            target_name = f"test_{basename}{ext}"
+
+        target_path = _name_to_path.get(target_name)
+        if target_path:
+            current = state["scores"][target_path]
+            state["scores"][target_path] = min(1.0, current + 0.20)
 
     # Phase 4: Pinned file floor
     for pinned in PINNED_FILES:
@@ -825,12 +1145,13 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
     if predictor:
         try:
             active_files = [p for p, s in state["scores"].items() if s >= WARM_THRESHOLD]
-            predictions = predictor.predict(active_files, top_k=PREDICTIVE_PREWARM_TOP_K)
+            predictions = predictor.predict_with_prompt(
+                prompt, active_files, top_k=PREDICTIVE_PREWARM_TOP_K
+            )
             for path, prob in predictions:
                 if path in state["scores"]:
                     current = state["scores"][path]
                     if current < WARM_THRESHOLD:  # Only pre-warm COLD files
-                        # Boost by prediction confidence, scaled and capped
                         boost = min(PREDICTIVE_PREWARM_MAX_BOOST, prob * PREDICTIVE_PREWARM_CONFIDENCE_SCALE)
                         state["scores"][path] = min(WARM_THRESHOLD - PREDICTIVE_PREWARM_MARGIN, current + boost)
         except Exception:
@@ -838,13 +1159,18 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
 
     # Phase 6: Update consecutive_turns counters for prompt cache stability
     # Files that are HOT or WARM this turn increment their streak.
-    # Files that drop to COLD reset to 0.
+    # Files that drop to COLD are removed to prevent unbounded growth.
     for path, score in state["scores"].items():
         tier = get_tier(score)
         if tier in ("HOT", "WARM"):
             state["consecutive_turns"][path] = state["consecutive_turns"].get(path, 0) + 1
         else:
-            state["consecutive_turns"][path] = 0
+            state["consecutive_turns"].pop(path, None)
+
+    # Prune stale entries for files no longer in scores
+    stale_keys = [k for k in state["consecutive_turns"] if k not in state["scores"]]
+    for k in stale_keys:
+        del state["consecutive_turns"][k]
 
     state["turn_count"] = state.get("turn_count", 0) + 1
     return state, directly_activated
@@ -958,6 +1284,8 @@ def get_tier(score: float) -> str:
         return "HOT"
     elif score >= WARM_THRESHOLD:
         return "WARM"
+    elif score >= HINT_THRESHOLD:
+        return "HINT"
     return "COLD"
 
 
@@ -1062,6 +1390,70 @@ def _get_source_summary(file_path: str) -> str | None:
         return None
 
 
+# Diversity-aware file selection constants
+DIVERSITY_LAMBDA = 0.7          # Balance: 0.7 relevance, 0.3 diversity
+MAX_PER_DIRECTORY = 3           # Hard cap: max files from same parent dir
+DIVERSITY_PENALTY = 0.15        # Score penalty per already-selected sibling
+
+
+def _directory_of(path: str) -> str:
+    """Get the parent directory of a path."""
+    parts = path.replace("\\", "/").rsplit("/", 1)
+    return parts[0] if len(parts) > 1 else ""
+
+
+def select_diverse_files(
+    candidates: list[tuple[str, float]],
+    max_files: int,
+    state: dict,
+) -> list[tuple[str, float]]:
+    """Select files using MMR-style diversity-aware selection.
+
+    Ensures spread across directories while respecting score ordering.
+    Files from over-represented directories get penalized so coverage
+    across the project is maximized.
+    """
+    if len(candidates) <= max_files:
+        return candidates
+
+    selected = []
+    remaining = list(candidates)
+    dir_counts: dict[str, int] = {}
+
+    while len(selected) < max_files and remaining:
+        best_idx = -1
+        best_mmr = -float("inf")
+
+        for i, (path, score) in enumerate(remaining):
+            directory = _directory_of(path)
+
+            # Hard cap: skip if directory already at max
+            if dir_counts.get(directory, 0) >= MAX_PER_DIRECTORY:
+                continue
+
+            # MMR score: relevance minus diversity penalty
+            siblings = dir_counts.get(directory, 0)
+            penalty = siblings * DIVERSITY_PENALTY
+            mmr_score = DIVERSITY_LAMBDA * score - (1 - DIVERSITY_LAMBDA) * penalty
+
+            if mmr_score > best_mmr:
+                best_mmr = mmr_score
+                best_idx = i
+
+        if best_idx < 0:
+            # All remaining from maxed-out directories — take best by score
+            best_idx = 0
+
+        path, score = remaining.pop(best_idx)
+        selected.append((path, score))
+        directory = _directory_of(path)
+        dir_counts[directory] = dir_counts.get(directory, 0) + 1
+
+    # Re-sort for cache stability
+    selected.sort(key=lambda item: _cache_sort_key(item, state))
+    return selected
+
+
 def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
     """
     Build tiered context output respecting limits.
@@ -1096,11 +1488,28 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
         tier = get_tier(score)
         is_source = _is_source_file(file_path)
 
+        # Adaptive injection: demote HOT → WARM unless truly confident
+        # A file is "confident HOT" if:
+        #   - Score >= CONFIDENT_HOT_THRESHOLD (very high), OR
+        #   - Has been warm for CONFIDENT_HOT_MIN_STREAK consecutive turns
+        # This saves ~450 tokens per demoted file (full content → TOC header)
         if tier == "HOT":
-            if is_source:
-                hot_sources.append((file_path, score))
+            streak = state.get("consecutive_turns", {}).get(file_path, 0)
+            is_confident = (
+                score >= CONFIDENT_HOT_THRESHOLD
+                or streak >= CONFIDENT_HOT_MIN_STREAK
+            )
+            if is_confident:
+                if is_source:
+                    hot_sources.append((file_path, score))
+                else:
+                    hot_docs.append((file_path, score))
             else:
-                hot_docs.append((file_path, score))
+                # Demote to WARM — still useful (TOC), much cheaper
+                if is_source:
+                    warm_sources.append((file_path, score))
+                else:
+                    warm_docs.append((file_path, score))
         elif tier == "WARM":
             if is_source:
                 warm_sources.append((file_path, score))
@@ -1109,19 +1518,23 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
         else:
             stats["cold"] += 1
 
-    # Sort for prompt cache stability
-    hot_docs.sort(key=lambda item: _cache_sort_key(item, state))
-    hot_docs = hot_docs[:MAX_HOT_FILES]
+    # Diversity-aware selection: spread across directories
+    all_doc_candidates = hot_docs + warm_docs
+    all_doc_candidates.sort(key=lambda x: x[1], reverse=True)
+    diverse_docs = select_diverse_files(
+        all_doc_candidates, MAX_HOT_FILES + MAX_WARM_FILES, state
+    )
+    hot_docs = [(p, s) for p, s in diverse_docs if get_tier(s) == "HOT"][:MAX_HOT_FILES]
+    warm_docs = [(p, s) for p, s in diverse_docs if get_tier(s) != "HOT"][:MAX_WARM_FILES]
 
-    warm_docs.sort(key=lambda item: _cache_sort_key(item, state))
-    warm_docs = warm_docs[:MAX_WARM_FILES]
-
-    # Limit source files separately
-    hot_sources.sort(key=lambda item: _cache_sort_key(item, state))
-    hot_sources = hot_sources[:SOURCE_MAX_HOT_FILES]
-
-    warm_sources.sort(key=lambda item: _cache_sort_key(item, state))
-    warm_sources = warm_sources[:SOURCE_MAX_WARM_FILES]
+    # Same for source files
+    all_src_candidates = hot_sources + warm_sources
+    all_src_candidates.sort(key=lambda x: x[1], reverse=True)
+    diverse_sources = select_diverse_files(
+        all_src_candidates, SOURCE_MAX_HOT_FILES + SOURCE_MAX_WARM_FILES, state
+    )
+    hot_sources = [(p, s) for p, s in diverse_sources if get_tier(s) == "HOT"][:SOURCE_MAX_HOT_FILES]
+    warm_sources = [(p, s) for p, s in diverse_sources if get_tier(s) != "HOT"][:SOURCE_MAX_WARM_FILES]
 
     hot_blocks = []
     warm_blocks = []
@@ -1207,13 +1620,49 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
     # Add source chars to total
     total_chars += source_chars
 
+    # === HINT FILES ===
+    # Path-only suggestions: overflow WARM files + borderline HINT files
+    # Very cheap (~5 tokens each) but tells Claude "these files exist"
+    # Overflow WARM files are high-scoring but didn't fit in core selection
+    hint_blocks = []
+    hint_files = []
+    already = {p for p, _ in hot_docs + warm_docs + hot_sources + warm_sources}
+    # First: overflow WARM files (highest value — scored WARM but not selected)
+    for file_path, score in sorted_files:
+        if len(hint_files) >= HINT_MAX_FILES:
+            break
+        if file_path in already:
+            continue
+        tier = get_tier(score)
+        if tier in ("WARM", "HOT"):
+            hint_files.append((file_path, score))
+            already.add(file_path)
+    # Then: traditional HINT tier files
+    for file_path, score in sorted_files:
+        if len(hint_files) >= HINT_MAX_FILES:
+            break
+        if file_path in already:
+            continue
+        tier = get_tier(score)
+        if tier == "HINT":
+            hint_files.append((file_path, score))
+
+    if hint_files:
+        hints_text = "─── [HINT] Related files (mention to load) ───\n"
+        for file_path, score in hint_files:
+            hints_text += f"  {file_path}\n"
+        hint_blocks.append(hints_text)
+        total_chars += len(hints_text)
+    stats["hint"] = len(hint_files)
+
     # Combine output
     output_parts = []
 
     # Status header
     turn_label = f"Turn {state['turn_count']}"
     tier_line = f"Hot: {stats['hot']}  Warm: {stats['warm']}  Cold: {stats['cold']}"
-    src_line = f"Src: {stats['hot_src']}H/{stats['warm_src']}W" if (stats['hot_src'] + stats['warm_src']) > 0 else ""
+    hint_info = f"  Hint: {stats['hint']}" if stats.get('hint') else ""
+    src_line = f"Src: {stats['hot_src']}H/{stats['warm_src']}W{hint_info}" if (stats['hot_src'] + stats['warm_src'] + stats.get('hint', 0)) > 0 else ""
     chars_line = f"Chars: {total_chars:,} / {MAX_TOTAL_CHARS:,}"
     header_w = max(len(turn_label), len(tier_line), len(chars_line), len(src_line)) + 4
     header_lines = [
@@ -1241,6 +1690,9 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
 
     # Source files (with [HOT:SRC] / [WARM:SRC] labels)
     output_parts.extend(source_blocks)
+
+    # Hint files (path-only, very cheap)
+    output_parts.extend(hint_blocks)
 
     return "\n\n".join(output_parts), stats
 
@@ -1514,6 +1966,22 @@ def main():
     state_file = get_state_file()
     prev_state = load_state(state_file)  # Keep copy before mutation
     state = copy.deepcopy(prev_state)  # Deep copy for modification
+
+    # Auto-warmup on first turn of session
+    if state.get("turn_count", 0) == 0 and not state.get("warmup_applied"):
+        try:
+            from attnroute.warmup import build_warmup_state
+            warmup = build_warmup_state(str(Path.cwd()), quick=True)
+            warmup_scores = warmup.get("scores", {})
+            for path, warmup_score in warmup_scores.items():
+                current = state.get("scores", {}).get(path, 0)
+                if warmup_score > current:
+                    state.setdefault("scores", {})[path] = warmup_score
+                    state.setdefault("consecutive_turns", {})[path] = 0
+            state["warmup_applied"] = True
+            print(f"[attnroute] Auto-warmup: {len(warmup_scores)} files pre-warmed", file=sys.stderr)
+        except Exception as e:
+            print(f"[attnroute] Auto-warmup failed: {e}", file=sys.stderr)
 
     # Update attention based on prompt
     state, activated = update_attention(state, prompt)
