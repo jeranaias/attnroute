@@ -1,6 +1,6 @@
 <h1 align="center">attnroute</h1>
 <h3 align="center">Intelligent Context Routing for Claude Code</h3>
-<p align="center"><strong>Intelligent Context Selection | <200ms per prompt | Zero Config Required</strong></p>
+<p align="center"><strong>Intelligent Context Selection | Fast per-prompt injection | Zero Config Required</strong></p>
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Smart_Context-Injection-brightgreen.svg" alt="Smart Context Injection">
-  <img src="https://img.shields.io/badge/Latency-<200ms_warm-blue.svg" alt="Latency: <200ms warm">
+  <img src="https://img.shields.io/badge/Latency-95--309ms-blue.svg" alt="Latency: 95-309ms">
   <img src="https://img.shields.io/badge/Zero_Config-Required-blueviolet.svg" alt="Zero Config">
 </p>
 
@@ -67,7 +67,7 @@ Just ask Claude to install it for you:
 ```
 You: "Install attnroute for this project"
 
-Claude: pip install attnroute[all] && attnroute init
+Claude: pip install attnroute && attnroute init
 ```
 
 Then type `/hooks` and approve the new hooks. **Done** - works immediately, no restart needed.
@@ -76,7 +76,7 @@ Then type `/hooks` and approve the new hooks. **Done** - works immediately, no r
 
 ```bash
 # Install
-pip install attnroute[all]
+pip install attnroute
 
 # Initialize for your project
 cd /path/to/your/project
@@ -88,12 +88,12 @@ claude
 
 ```
 Before attnroute:  Claude hunts for files via tool calls (variable token cost)
-After attnroute:   Pre-selected relevant context injected (~2K tokens, 90%+ reduction)
+After attnroute:   Pre-selected relevant context injected (~2K tokens vs. full codebase)
 ```
 
 ---
 
-attnroute is a **hook system for [Claude Code](https://github.com/anthropics/claude-code)** that automatically injects smart context into every prompt. Instead of Claude reading your entire codebase (millions of tokens, slow, expensive), it sees only relevant files and symbols (thousands of tokens, fast, cheap).
+attnroute is a **hook system for [Claude Code](https://github.com/anthropics/claude-code)** that automatically injects smart context into every prompt. Instead of Claude spending tool calls searching for relevant files, it gets the right files and symbols pre-loaded (thousands of tokens, fast).
 
 **The core innovation**: attnroute maintains a "working memory" of your codebase—tracking which files you interact with, learning co-activation patterns, and using PageRank on dependency graphs to rank importance.
 
@@ -506,7 +506,7 @@ attnroute status
 # Output:
 # attnroute Status
 # ══════════════════════════════════════════════════════════════
-# Version: 1.0.0
+# Version: 1.0.1
 # Features:
 #   ✓ BM25 search
 #   ✓ Semantic search
@@ -1027,7 +1027,7 @@ SOFTWARE.
 
 This project emerged from frustration with Claude Code's "read everything" approach on large codebases. After watching Claude waste tokens on irrelevant files over and over, I built attnroute to solve the problem once and for all.
 
-The core insight: **attention is all you need** (in the literal sense). By tracking which files you actually interact with, learning co-activation patterns, and ranking by dependency importance, we can reduce context tokens by 90%+ while still providing Claude the files it needs.
+The core insight: **attention is all you need** (in the literal sense). By tracking which files you actually interact with, learning co-activation patterns, and ranking by dependency importance, we can dramatically reduce context size while still providing Claude the files it needs.
 
 ---
 

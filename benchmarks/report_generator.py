@@ -41,7 +41,11 @@ def generate_report() -> str:
     lines.append("# attnroute Benchmark Report")
     lines.append("")
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    lines.append("Version: v0.7.0")
+    try:
+        from attnroute import __version__
+        lines.append(f"Version: v{__version__}")
+    except ImportError:
+        lines.append("Version: unknown")
     lines.append("")
 
     # ================================================================
