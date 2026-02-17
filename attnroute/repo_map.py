@@ -21,7 +21,6 @@ Usage:
 """
 
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,7 +30,6 @@ try:
     TREE_SITTER_AVAILABLE = True
 except ImportError:
     TREE_SITTER_AVAILABLE = False
-    print("Warning: tree-sitter-languages not installed. Using regex fallback.", file=sys.stderr)
 
 # Try to import networkx for PageRank
 try:

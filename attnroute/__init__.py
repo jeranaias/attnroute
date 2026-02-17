@@ -1,7 +1,7 @@
 """
 attnroute - Context routing for AI coding assistants
 
-Reduces token usage by 90%+ through intelligent context selection.
+Reduces token usage through intelligent context selection.
 Learns which files you actually use and predicts what you'll need next.
 
 Features:
@@ -17,7 +17,7 @@ Quick start:
     attnroute status
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __author__ = "jeranaias"
 __all__ = [
     "__version__",

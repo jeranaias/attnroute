@@ -76,9 +76,10 @@ def get_repo_info(repo_path: Path) -> dict:
     # Check if git repo
     info["is_git"] = (repo_path / ".git").exists()
 
-    # Count files by extension
+    # Count files by extension (capped to prevent hanging on large dirs)
     file_types = {}
     file_count = 0
+    MAX_FILES = 10_000
 
     try:
         for f in repo_path.rglob("*"):
@@ -90,6 +91,8 @@ def get_repo_info(repo_path: Path) -> dict:
                 file_count += 1
                 ext = f.suffix.lower() or "(no extension)"
                 file_types[ext] = file_types.get(ext, 0) + 1
+                if file_count >= MAX_FILES:
+                    break
     except Exception:
         pass
 

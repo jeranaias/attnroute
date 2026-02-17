@@ -1,6 +1,6 @@
 <h1 align="center">attnroute</h1>
 <h3 align="center">Intelligent Context Routing for Claude Code</h3>
-<p align="center"><strong>90%+ Token Reduction | <200ms per prompt | Zero Config Required</strong></p>
+<p align="center"><strong>Intelligent Context Selection | <200ms per prompt | Zero Config Required</strong></p>
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Token_Reduction-90%25+-brightgreen.svg" alt="Token Reduction: 90%+">
+  <img src="https://img.shields.io/badge/Smart_Context-Injection-brightgreen.svg" alt="Smart Context Injection">
   <img src="https://img.shields.io/badge/Latency-<200ms_warm-blue.svg" alt="Latency: <200ms warm">
   <img src="https://img.shields.io/badge/Zero_Config-Required-blueviolet.svg" alt="Zero Config">
 </p>
@@ -22,8 +22,8 @@
 </p>
 
 <p align="center">
-  <code>pip install attnroute[all] && attnroute init</code><br>
-  <em>Works immediately — no restart needed</em>
+  <code>pip install attnroute && attnroute init</code><br>
+  <em>Works immediately — no restart needed. Zero dependencies.</em>
 </p>
 
 <p align="center">
@@ -406,7 +406,10 @@ attnroute uses a dual-mode predictor to guess which files you'll need:
 > 3. Unpredicted files can still be Read by Claude on demand
 > 4. The goal is reducing *unnecessary* context, not perfect prediction
 
-The predictor improves over time as it learns your usage patterns.
+The predictor improves over time as it learns your usage patterns. On a fresh install,
+attnroute uses heuristics (git recency, import graphs, file timestamps) to provide
+useful context immediately. The co-activation learner activates after ~25 turns of
+observed usage and gets better from there.
 
 ### Run Your Own Benchmark
 
@@ -430,7 +433,7 @@ attnroute benchmark
 
 | Approach | Context Reduction | Setup | Learning | Auto-context | Plugin System |
 |----------|-------------------|-------|----------|--------------|---------------|
-| **attnroute** | 90%+ | 30 seconds | Co-activation + PageRank | Per-prompt | 4 built-in |
+| **attnroute** | 97-99%* | Under a minute | Co-activation + PageRank | Per-prompt | 4 built-in |
 | **Aider** repo map | 80-95% | Config file | No | Per-session | No |
 | **Repomix** | 70-90% | Manual | No | No | No |
 | **.claudeignore** (native) | 50-70% | Minutes | No | No | No |
@@ -455,7 +458,7 @@ Then: /hooks → approve the new hooks
 
 **From terminal**:
 ```bash
-pip install attnroute[all]
+pip install attnroute
 cd /path/to/your/project
 attnroute init
 claude  # start Claude Code
@@ -476,9 +479,13 @@ pip install attnroute[graph]
 # With Claude API memory compression
 pip install attnroute[compression]
 
-# Everything (recommended)
+# Everything (Python 3.10-3.13 only — tree-sitter has no 3.14 wheels yet)
 pip install attnroute[all]
 ```
+
+> **Python 3.14**: Use `pip install attnroute` (base install). The `[all]` and `[graph]` extras
+> require `tree-sitter-languages` which doesn't have Python 3.14 wheels yet.
+> The core works fine on 3.14 with a regex fallback for AST parsing.
 
 #### Dependency Breakdown
 

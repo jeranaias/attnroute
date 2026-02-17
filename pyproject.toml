@@ -1,7 +1,7 @@
 [project]
 name = "attnroute"
-version = "1.0.0"
-description = "Context routing for AI coding assistants - 90%+ token reduction"
+version = "1.0.1"
+description = "Intelligent context routing for Claude Code - smart file injection + behavioral plugins"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "jeranaias", email = "jeranaias@gmail.com"}]

@@ -5,6 +5,20 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-02-16
+
+### Fixed
+- `attnroute diagnostic` hangs indefinitely on large directories (capped file walk at 10K files)
+- Import-time warning spam removed (tree-sitter fallback, auto-keyword extraction)
+- `attnroute version` now shows correct install hints for each extra
+
+### Changed
+- README: Qualified token reduction claims with proper methodology context
+- README: Added cold-start learning note (heuristics work immediately, learner activates after ~25 turns)
+- README: Added Python 3.14 compatibility note (`[all]`/`[graph]` extras need 3.10-3.13)
+- README: Default install command changed to `pip install attnroute` (zero deps, works on all Python versions)
+- Hero demo: Numbers now match real benchmark results; "Stops edits" → "Flags edits"
+
 ## [1.0.0] - 2026-02-16
 
 ### Milestone

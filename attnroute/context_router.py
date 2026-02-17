@@ -490,7 +490,7 @@ def load_keyword_config() -> tuple[dict[str, list[str]], dict[str, list[str]], l
             docs_root = Path(".claude") if Path(".claude").is_dir() else Path.home() / ".claude"
             auto_kw = auto_extract_keywords(docs_root)
             if auto_kw:
-                print(f"[attnroute] Auto-extracted keywords from {len(auto_kw)} files (no keywords.json)", file=sys.stderr)
+                pass  # Auto-extracted keywords silently
                 return auto_kw, {}, []
         except Exception:
             pass

@@ -231,19 +231,19 @@ def cmd_version(args):
     print("\nFeature availability:")
 
     checks = [
-        ("bm25s", "BM25 Search"),
-        ("model2vec", "Semantic Search"),
-        ("networkx", "Graph Retrieval"),
-        ("tree_sitter_languages", "AST Parsing"),
-        ("anthropic", "Memory Compression"),
+        ("bm25s", "BM25 Search", "pip install attnroute[search]"),
+        ("model2vec", "Semantic Search", "pip install attnroute[search]"),
+        ("networkx", "Graph Retrieval", "pip install attnroute[graph]"),
+        ("tree_sitter_languages", "AST Parsing", "pip install attnroute[graph]"),
+        ("anthropic", "Memory Compression", "pip install attnroute[compression]"),
     ]
 
-    for module, name in checks:
+    for module, name, install_hint in checks:
         try:
             __import__(module)
             print(f"  {name}: Available")
         except ImportError:
-            print(f"  {name}: Not installed")
+            print(f"  {name}: Not installed ({install_hint})")
 
 
 def cmd_plugins(args):
