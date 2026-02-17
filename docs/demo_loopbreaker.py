@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LoopBreaker demo — stuck, intervention, recovery."""
+"""LoopBreaker demo — without vs with."""
 import sys
 if sys.stdout.encoding != "utf-8" and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -14,16 +14,17 @@ RESET = "\033[0m"
 
 print(f">> fix the JWT validation error in auth.py")
 print()
-print(f"  Turn 1:  Edit auth.py  ->  {RED}tests fail{RESET}")
-print(f"  Turn 2:  Edit auth.py  ->  {RED}tests fail{RESET}")
-print(f"  Turn 3:  Edit auth.py  ->  {RED}tests fail{RESET}  {YELLOW}3 attempts...{RESET}")
-print(f"  Turn 4:  Edit auth.py  ->  {RED}tests fail{RESET}")
-print(f"  Turn 5:  Edit auth.py  ->  {RED}tests fail{RESET}  {RED}{BOLD}5 attempts!{RESET}")
+print(f"  {RED}{BOLD}Without LoopBreaker:{RESET}")
+print(f"  Edit auth.py  {RED}tests fail{RESET}")
+print(f"  Edit auth.py  {RED}tests fail{RESET}")
+print(f"  Edit auth.py  {RED}tests fail{RESET}")
+print(f"  Edit auth.py  {RED}tests fail{RESET}")
+print(f"  Edit auth.py  {RED}tests fail{RESET}")
+print(f"  Edit auth.py  {RED}tests fail...{RESET}")
+print(f"  {RED}{BOLD}Same file. Same approach. Burns your tokens forever.{RESET}")
 print()
-print(f"  {BOLD}{RED}STOP -- same approach failed 5 times.{RESET}")
-print(f"  {BOLD}Re-read the file. Check your assumptions.{RESET}")
-print()
-print(f"  Turn 6:  {GREEN}Read{RESET} auth.py, conftest.py, test_auth.py")
-print(f"  Turn 7:  Edit {BOLD}conftest.py{RESET}  ->  {GREEN}{BOLD}tests pass!{RESET}")
-print()
-print(f"  {GREEN}{BOLD}Loop broken. Different file was the real problem.{RESET}")
+print(f"  {GREEN}{BOLD}With LoopBreaker:{RESET}")
+print(f"  {BOLD}5 attempts detected.{RESET} Stop and re-read.")
+print(f"  Read auth.py, conftest.py, test_auth.py")
+print(f"  Edit {BOLD}conftest.py{RESET}  {GREEN}{BOLD}tests pass!{RESET}")
+print(f"  {GREEN}{BOLD}Different file was the real problem.{RESET}")

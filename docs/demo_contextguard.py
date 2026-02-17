@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ContextGuard demo — prediction, compaction, recovery."""
+"""ContextGuard demo — without vs with."""
 import sys
 if sys.stdout.encoding != "utf-8" and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -12,18 +12,16 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RESET = "\033[0m"
 
-print(f">> also wire up the WebSocket handlers")
+print(f">> wire up the WebSocket handlers")
+print(f"  {DIM}Turn 65  |  16 active files{RESET}")
 print()
-print(f"  {DIM}Turn 65  |  16 active files  |  18K char injection{RESET}")
-print(f"  {BOLD}{YELLOW}HIGH compaction risk -- finish current subtask{RESET}")
-print()
+print(f"  {RED}{BOLD}Without ContextGuard:{RESET}")
 print(f"  {DIM}... 2 turns later ...{RESET}")
+print(f"  {RED}{BOLD}Context compacted.{RESET}")
+print(f"  Active files:  16  {RED}->  3{RESET}")
+print(f"  {RED}Claude forgot what it was doing. Starts over.{RESET}")
 print()
-print(f"  Active files:  {BOLD}16{RESET}  ->  {RED}{BOLD}3{RESET}")
-print(f"  {RED}Context compacted. Claude forgot what it was working on.{RESET}")
-print()
-print(f"  {DIM}ContextGuard recovers:{RESET}")
-print(f"  auth.py, session.py, middleware.py, config.py,")
-print(f"  routes.py, models.py + 6 more")
-print()
-print(f"  {GREEN}{BOLD}12 files recovered. Claude picks up where it left off.{RESET}")
+print(f"  {GREEN}{BOLD}With ContextGuard:{RESET}")
+print(f"  {BOLD}{YELLOW}HIGH compaction risk{RESET} {DIM}-- finish current subtask{RESET}")
+print(f"  {DIM}Compaction hits...{RESET}")
+print(f"  {GREEN}{BOLD}12 files recovered.{RESET} Claude picks up where it left off.")
