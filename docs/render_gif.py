@@ -207,7 +207,7 @@ def split_into_scenes(output):
     return scenes
 
 
-def make_gif(script_path, output_path, title="attnroute", frame_duration=3000):
+def make_gif(script_path, output_path, title="attnroute", frame_duration=5000):
     """Generate an animated GIF from a demo script."""
     print(f"  Capturing: {script_path.name}")
     output = capture_output(script_path)
