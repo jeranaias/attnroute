@@ -22,7 +22,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo.gif" alt="attnroute Demo" width="700">
+  <code>pip install attnroute[all] && attnroute init</code><br>
+  <em>Works immediately — no restart needed</em>
 </p>
 
 ---
@@ -66,7 +67,7 @@ attnroute is a **hook system for [Claude Code](https://github.com/anthropics/cla
 
 **The core innovation**: attnroute maintains a "working memory" of your codebase—tracking which files you interact with, learning co-activation patterns, and using PageRank on dependency graphs to rank importance.
 
-**v0.7.0+ source code routing**: The search index covers your actual source tree, not just `.claude/*.md` docs. Source files matched by BM25 get tree-sitter outline injection (function signatures, class definitions, imports)—not raw file content. No config needed—just works.
+**Source code routing** (v0.7+): The search index covers your actual source tree, not just `.claude/*.md` docs. Source files matched by BM25 get tree-sitter outline injection (function signatures, class definitions, imports)—not raw file content. No config needed—just works.
 
 ### Verified Performance
 
@@ -396,11 +397,18 @@ attnroute benchmark
 
 ### Comparison with Alternatives
 
-| Approach | Context Compression | Setup | Maintenance |
-|----------|---------------------|-------|-------------|
-| **attnroute** | 90%+ | 30 seconds | Zero |
-| Manual file picking | 90%+ | Per-query | High |
-| .claudeignore | 50-70% | Minutes | Medium |
+| Approach | Context Reduction | Setup | Learning | Auto-context | Plugin System |
+|----------|-------------------|-------|----------|--------------|---------------|
+| **attnroute** | 90%+ | 30 seconds | Co-activation + PageRank | Per-prompt | 4 built-in |
+| **Aider** repo map | 80-95% | Config file | No | Per-session | No |
+| **Repomix** | 70-90% | Manual | No | No | No |
+| **.claudeignore** (native) | 50-70% | Minutes | No | No | No |
+| Manual file picking | 90%+ | Per-query | No | No | No |
+
+> **Note**: Aider's repo mapping is the closest alternative — attnroute builds on the same
+> tree-sitter + PageRank idea and adds usage-pattern learning, session lifecycle hooks, and
+> behavioral plugins. The approaches are complementary: Aider targets its own chat interface,
+> attnroute targets Claude Code.
 
 ---
 
@@ -460,7 +468,7 @@ attnroute status
 # Output:
 # attnroute Status
 # ══════════════════════════════════════════════════════════════
-# Version: 0.5.13
+# Version: 1.0.0
 # Features:
 #   ✓ BM25 search
 #   ✓ Semantic search
@@ -648,6 +656,11 @@ You MUST read a file before editing it.
 
 **Violation logging**: All violations are logged to `~/.claude/plugins/verifyfirst_violations.jsonl` for analysis.
 
+**v2.1 Features:**
+- **Freshness tracking**: Each verified file is labeled `fresh`, `aging`, or `STALE` based on how many turns ago it was read
+- **Edit velocity alerts**: Detects rapid edit-without-read patterns (speculative editing)
+- **Cross-plugin integration**: Reacts to ContextGuard's compaction flag — marks all reads as stale after context compaction
+
 ---
 
 ### LoopBreaker
@@ -685,6 +698,11 @@ signature = f"{tool}|{normalized_path}|{key_identifiers}|{command}"
 - Works on a different file
 - Uses a fundamentally different approach (different signature)
 - Only reads without writing (exploration mode)
+
+**v3.0 Features:**
+- **Git progress detection**: Uses `git diff` to detect zero-change loops — edits that don't actually persist
+- **Multi-metric severity**: Combines signature repetition, failure count, and git progress into a 0-1 composite score
+- **State machine**: `detected` → `escalated` → `cooling` stages with automatic cooldown after idle turns
 
 ---
 
@@ -730,6 +748,11 @@ signature = f"{tool}|{normalized_path}|{key_identifiers}|{command}"
 | Max 20x | 2,000,000 | >300K session tokens |
 | API | Unlimited | Model name contains "api" |
 
+**v1.0 Features:**
+- **Budget alerts**: Configure daily/weekly token budgets in `~/.claude/plugins/config.json` — warning at 80%
+- **Usage export**: `export_usage(format="csv", days=7)` for external analysis or billing reconciliation
+- **Weekly summaries**: Automatic per-model token breakdown, generated once per day
+
 ---
 
 ### ContextGuard
@@ -753,6 +776,11 @@ _These files were recently active. Re-read any you need._
 
 **Recovery is automatic**: No user action needed. Claude sees the recovery block and knows which files to re-read.
 
+**v1.0 Features:**
+- **Compaction prediction**: Estimates compaction risk (low/medium/high) based on injection size trend + turn count
+- **CLAUDE.md hint**: Recovery block reminds Claude to re-read project instructions after compaction
+- **Cross-plugin flag**: Writes `compaction_occurred.flag` consumed by VerifyFirst to mark all reads as stale
+
 ---
 
 ### Plugin CLI
@@ -763,10 +791,10 @@ attnroute plugins list
 
 # Output:
 # Installed plugins:
-#   verifyfirst v0.1.0 - Ensures files are read before being edited [enabled]
-#   loopbreaker v0.1.0 - Detects and breaks repetitive failure loops [enabled]
-#   burnrate v0.3.0 - Real-time rate limit tracker with historical usage reports [enabled]
-#   contextguard v0.1.0 - Post-compaction amnesia prevention [enabled]
+#   verifyfirst v2.1.0 - Ensures files are read before being edited (with freshness tracking) [enabled]
+#   loopbreaker v3.0.0 - Detects and breaks repetitive failure loops (multi-metric) [enabled]
+#   burnrate v1.0.0 - Real-time rate limit tracker with budget alerts [enabled]
+#   contextguard v1.0.0 - Post-compaction amnesia prevention with prediction [enabled]
 
 # View plugin statistics
 attnroute plugins status verifyfirst
@@ -795,6 +823,16 @@ attnroute plugins status burnrate
 #   session_tokens: 45230
 #   tokens_per_minute: 892.4
 #   minutes_remaining: 117.5
+
+attnroute plugins status contextguard
+
+# Output:
+# contextguard status:
+#   turn_count: 34
+#   recoveries: 1
+#   max_recoveries: 5
+#   recoveries_remaining: 4
+#   injection_sizes: [8200, 8500, 9100]
 
 # Disable a plugin
 attnroute plugins disable burnrate
@@ -880,26 +918,11 @@ pip install attnroute[all]
 
 ## Security
 
-attnroute v0.7.0 includes comprehensive security hardening:
+attnroute includes comprehensive security hardening. See [SECURITY.md](SECURITY.md) for details.
 
-### Input Validation
-- **Stdin size limits**: 10MB max to prevent memory exhaustion attacks
-- **Path traversal prevention**: All file paths validated against allowed directories
-- **Plugin name validation**: Blocks path separators, null bytes, and Windows reserved names
+**Key protections**: Stdin size limits (10MB), path traversal prevention, Windows ADS blocking, atomic file writes, TOCTOU elimination.
 
-### Platform-Specific Protections
-- **Windows ADS blocking**: Detects and blocks Alternate Data Stream paths (`file.txt:hidden`)
-- **Reserved name blocking**: Blocks Windows device names (CON, NUL, COM1, etc.)
-- **Null byte injection prevention**: Validates paths contain no null bytes
-
-### Data Integrity
-- **Atomic file writes**: State files use temp-file-then-rename pattern
-- **Type validation**: All JSON loaders validate expected types
-- **TOCTOU elimination**: 20+ race conditions fixed with try/except patterns
-
-### Reporting Issues
-
-If you discover a security vulnerability, please email jeranaias@gmail.com directly rather than opening a public issue.
+**Reporting vulnerabilities**: Email jeranaias@gmail.com directly (not a public issue).
 
 ---
 
@@ -935,7 +958,7 @@ mypy attnroute/
 
 MIT License
 
-Copyright (c) 2024 jeranaias
+Copyright (c) 2024-2026 jeranaias
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

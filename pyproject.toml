@@ -1,6 +1,6 @@
 [project]
 name = "attnroute"
-version = "0.7.0"
+version = "1.0.0"
 description = "Context routing for AI coding assistants - 90%+ token reduction"
 readme = "README.md"
 license = {text = "MIT"}
@@ -8,12 +8,13 @@ authors = [{name = "jeranaias", email = "jeranaias@gmail.com"}]
 requires-python = ">=3.10"
 keywords = ["claude", "llm", "context", "attention", "token-efficiency", "ai-coding"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]

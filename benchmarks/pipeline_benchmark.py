@@ -520,7 +520,7 @@ def main():
 
     print()
     print("=" * 70)
-    print("ATTNROUTE PIPELINE BENCHMARK v0.5.13")
+    print("ATTNROUTE PIPELINE BENCHMARK v1.0.0")
     print("=" * 70)
     print(f"  Repository: {repo_path}")
     print(f"  Runs:       {num_runs}")

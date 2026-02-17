@@ -5,6 +5,77 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-02-16
+
+### Milestone
+- **Production release**: All 4 plugins at v1.0+, 345+ tests passing, lint clean
+- Development Status classifier changed from "4 - Beta" to "5 - Production/Stable"
+
+### Added
+- SECURITY.md with responsible disclosure policy
+- GitHub issue templates (bug report, feature request)
+- Python 3.13 to CI test matrix, Python 3.14-dev as allow-failure
+- Expanded competitor comparison table (Aider, Repomix, .claudeignore)
+
+### Changed
+- README: Updated all plugin sections with v1.0 features and current version numbers
+- README: Replaced broken demo.gif with install instructions
+- README: Trimmed security section with link to SECURITY.md
+
+## [0.7.0] - 2026-02-15
+
+### Added
+- **ContextGuard v1.0.0** — post-compaction amnesia prevention
+  - Compaction prediction based on injection size trend + turn count
+  - Recovery analytics with timestamps
+  - CLAUDE.md recovery hint in injected context
+  - Cross-plugin flag file (`compaction_occurred.flag`) for VerifyFirst integration
+- **LoopBreaker v3.0.0** — multi-metric loop detection
+  - Git-based progress detection (zero-change detection via `git diff`)
+  - Multi-metric severity scoring (signature repetition + failures + git progress)
+  - State machine stages: detected → escalated → cooling
+- **VerifyFirst v2.1.0** — freshness tracking
+  - Read registry summary with freshness labels (fresh/aging/STALE)
+  - Edit velocity tracking with speculative editing alerts
+  - Cross-plugin ContextGuard compaction flag integration
+- **BurnRate v1.0.0** — budget system
+  - Configurable daily/weekly token budgets via `~/.claude/plugins/config.json`
+  - CSV/JSON export of usage history (`export_usage()`)
+  - Weekly per-model token breakdown summaries
+- Neural predictor module (experimental)
+- Intent map module (experimental)
+- Warmup module for pre-loading project context
+- Project profiling module
+- New benchmark suite: pipeline, plugin, multi-repo, resource, session replay
+
+### Changed
+- ContextGuard registered as entry point in pyproject.toml
+- Core context router improvements (500+ lines)
+- Indexer: expanded source file handling
+- Session init: plugin lifecycle improvements
+
+## [0.6.1] - 2026-02-12
+
+### Fixed
+- **BurnRate billing audit**: Cache tier awareness for more accurate cost estimates
+  - Separate 5-minute and 1-hour cache write rates in MODEL_PRICING
+  - Ephemeral cache tier extraction from JSONL objects
+  - Per-tier cost breakdown in audit output
+
+## [0.6.0] - 2026-02-12
+
+### Added
+- **BurnRate billing audit** — cross-references JSONL token data against published API rates
+  - `get_billing_audit()` and `format_billing_audit()` for terminal reports
+  - Real-time 5-hour sliding window rate limit tracking with burn rate and ETA
+  - Per-project, per-model, per-day cost attribution
+  - Insights: peak hours, session stats, cache hit rate, busiest day
+- 112 tests (99 core + 13 billing audit)
+
+### Fixed
+- LoopBreaker: fuzzy signature similarity detection
+- VerifyFirst: pattern matching for glob/grep targets
+
 ## [0.5.13] - 2026-02-12
 
 ### Fixed
@@ -277,6 +348,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `attnroute init` and `attnroute status` commands
 - Zero required dependencies
 
+[1.0.0]: https://github.com/jeranaias/attnroute/compare/v0.7.0...v1.0.0
+[0.7.0]: https://github.com/jeranaias/attnroute/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/jeranaias/attnroute/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/jeranaias/attnroute/compare/v0.5.13...v0.6.0
 [0.5.13]: https://github.com/jeranaias/attnroute/compare/v0.5.12...v0.5.13
 [0.5.12]: https://github.com/jeranaias/attnroute/compare/v0.5.11...v0.5.12
 [0.5.11]: https://github.com/jeranaias/attnroute/compare/v0.5.10...v0.5.11
