@@ -26,6 +26,10 @@
   <em>Works immediately — no restart needed</em>
 </p>
 
+<p align="center">
+  <img src="docs/demo.gif" alt="attnroute demo — install, plugins, and live status" width="780">
+</p>
+
 ---
 
 ## Quick Start
@@ -636,6 +640,8 @@ All plugins are **enabled by default** and store state in `~/.claude/plugins/`.
 
 ### VerifyFirst
 
+<img src="docs/demo_verifyfirst.gif" alt="VerifyFirst demo — freshness tracking and violation detection" width="780">
+
 **Problem**: Claude sometimes makes speculative edits without first reading the file to understand context, leading to broken code or incorrect assumptions.
 
 **Solution**: VerifyFirst tracks every file Claude reads and flags violations when edits are attempted on unread files.
@@ -664,6 +670,8 @@ You MUST read a file before editing it.
 ---
 
 ### LoopBreaker
+
+<img src="docs/demo_loopbreaker.gif" alt="LoopBreaker demo — loop detection and intervention" width="780">
 
 **Problem**: Claude sometimes gets stuck making "multiple broken attempts instead of thinking through problems" — repeating the same failing approach 3, 4, 5+ times.
 
@@ -707,6 +715,8 @@ signature = f"{tool}|{normalized_path}|{key_identifiers}|{command}"
 ---
 
 ### BurnRate
+
+<img src="docs/demo_burnrate.gif" alt="BurnRate demo — rate limit tracking and budget alerts" width="780">
 
 **Problem**: Users report 10x variance in quota consumption rates, hitting rate limits unexpectedly with no warning.
 
@@ -756,6 +766,8 @@ signature = f"{tool}|{normalized_path}|{key_identifiers}|{command}"
 ---
 
 ### ContextGuard
+
+<img src="docs/demo_contextguard.gif" alt="ContextGuard demo — compaction prediction and recovery" width="780">
 
 **Problem**: When Claude Code's context window fills up (~95%), it compacts the conversation, losing all injected state including file context. This is the #1 community pain point — Claude "forgets" what it was working on.
 
