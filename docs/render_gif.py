@@ -91,7 +91,7 @@ def parse_ansi(text):
 
 
 # ── Frame renderer ──────────────────────────────────────────
-def render_frame(lines, width=1400, title="attnroute", font_size=22):
+def render_frame(lines, width=1400, title="attnroute", font_size=22, min_height=0):
     """Render a list of text lines into a terminal-style PIL image."""
     font = get_font(font_size)
     bold_font = get_bold_font(font_size)
@@ -101,7 +101,7 @@ def render_frame(lines, width=1400, title="attnroute", font_size=22):
     padding_y = 24
     title_height = 52
     content_height = len(lines) * line_height + padding_y * 2
-    height = title_height + content_height + 16  # bottom margin
+    height = max(title_height + content_height + 16, min_height)  # bottom margin
 
     img = Image.new('RGB', (width, height), BG_COLOR)
     draw = ImageDraw.Draw(img)
@@ -205,26 +205,31 @@ def make_gif(script_path, output_path, title="attnroute", frame_duration=3000):
     while all_lines and not all_lines[-1].strip():
         all_lines.pop()
 
-    frames = []
-
-    # Progressive reveal: show more lines with each frame
-    # Start with first scene, then add each scene
+    # Build the list of line sets for each frame (progressive reveal)
+    frame_lines = []
     accumulated = []
     for scene in scenes:
         accumulated.extend(scene)
-        # Remove trailing empty lines
         clean = list(accumulated)
         while clean and not clean[-1].strip():
             clean.pop()
         if clean:
-            frame = render_frame(clean, title=title)
-            frames.append(frame)
+            frame_lines.append(list(clean))
 
-    if not frames:
+    if not frame_lines:
         print(f"  ERROR: No frames generated for {script_path}")
         return
 
-    # Add a longer pause on the final frame
+    # Calculate height from the FINAL (largest) frame so all frames match
+    final_frame = render_frame(frame_lines[-1], title=title)
+    target_height = final_frame.size[1]
+
+    # Render all frames at the same height
+    frames = []
+    for lines in frame_lines:
+        frame = render_frame(lines, title=title, min_height=target_height)
+        frames.append(frame)
+
     # Save as animated GIF
     if len(frames) == 1:
         frames[0].save(str(output_path))
