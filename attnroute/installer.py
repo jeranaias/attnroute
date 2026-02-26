@@ -25,7 +25,7 @@ try:
     from attnroute.telemetry_lib import windows_utf8_io
     windows_utf8_io()
 except ImportError:
-    VERSION = "1.0.1"
+    VERSION = "1.0.2"
     # Fallback UTF-8 setup for Windows
     if sys.platform == "win32":
         for stream in (sys.stdout, sys.stderr):

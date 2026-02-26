@@ -1,6 +1,6 @@
 [project]
 name = "attnroute"
-version = "1.0.1"
+version = "1.0.2"
 description = "Intelligent context routing for Claude Code - smart file injection + behavioral plugins"
 readme = "README.md"
 license = {text = "MIT"}
