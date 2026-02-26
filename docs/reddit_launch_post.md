@@ -107,9 +107,11 @@ Scans your actual conversation JSONL files across **all projects** and builds a 
 - CSV and JSON export
 - Configurable daily/weekly budget alerts
 
-**This plugin caught that Anthropic was overcharging me.** I ran BurnRate's billing audit and found that 94.8% of my tokens were cache reads — which should be billed at $0.50/M — but my effective rate was $6.21/M. Over ~2.5 months, that added up to roughly **$6,000 in overcharges** across 591 line items. I've had an open support ticket for 3 weeks with no resolution. BurnRate gave me the per-model, per-day cost breakdown I needed to build an airtight case.
+**This plugin caught a major billing discrepancy.** I ran BurnRate's billing audit against my actual JSONL conversation logs and compared it to my extra usage charges. My JSONL data shows ~94% cache read tokens — which Anthropic's own pricing page says should be billed at $0.50/M (10% of the base input rate). But my 591 extra usage line items totaled **$6,670** against a conservatively estimated **$814** at published API rates. That's an **8x discrepancy**.
 
-This is the rate limit and cost visibility that should be built into Claude Code natively. You literally cannot see your own token usage or costs without parsing JSONL files yourself — or using something like this.
+I'm not the only one. GitHub issues [#24727](https://github.com/anthropics/claude-code/issues/24727) and [#28927](https://github.com/anthropics/claude-code/issues/28927) show other Max subscribers reporting billing mismatches — Claude Code reporting 100% usage while the dashboard shows 73%, silent billing changes, charges appearing 24 hours late. I've had a support ticket open for **3 weeks** with no resolution.
+
+Anthropic's docs say extra usage is "billed at standard API rates." If cache reads aren't getting the published 0.1x discount, every heavy Claude Code user on a Max plan is being overcharged and has no way to know — because there is zero cost visibility built into Claude Code. BurnRate gives you that visibility. Run it, check your own numbers, and see if yours add up.
 
 ---
 
