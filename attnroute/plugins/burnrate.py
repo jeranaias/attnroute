@@ -192,16 +192,17 @@ class BurnRatePlugin(AttnroutePlugin):
         daily_tokens = 0
 
         for r in records:
-            billable = (
+            total = (
                 r.get("input_tokens", 0)
                 + r.get("output_tokens", 0)
                 + r.get("cache_creation_tokens", 0)
+                + r.get("cache_read_tokens", 0)
             )
-            weekly_tokens += billable
+            weekly_tokens += total
 
             ts = self._parse_timestamp(r.get("timestamp"))
             if ts and ts.strftime("%Y-%m-%d") == today:
-                daily_tokens += billable
+                daily_tokens += total
 
         return (daily_tokens, weekly_tokens)
 
@@ -334,14 +335,15 @@ class BurnRatePlugin(AttnroutePlugin):
                 by_model: dict[str, int] = {}
 
                 for r in history_records:
-                    billable = (
+                    total = (
                         r.get("input_tokens", 0)
                         + r.get("output_tokens", 0)
                         + r.get("cache_creation_tokens", 0)
+                        + r.get("cache_read_tokens", 0)
                     )
-                    total_tokens += billable
+                    total_tokens += total
                     model = r.get("model", "unknown")
-                    by_model[model] = by_model.get(model, 0) + billable
+                    by_model[model] = by_model.get(model, 0) + total
 
                 state["weekly_summary"] = {
                     "date": today_str,
@@ -699,7 +701,7 @@ class BurnRatePlugin(AttnroutePlugin):
             out = r.get("output_tokens", 0)
             cc = r.get("cache_creation_tokens", 0)
             cr = r.get("cache_read_tokens", 0)
-            billable = inp + out + cc
+            total = inp + out + cc + cr
 
             total_input += inp
             total_output += out
@@ -707,20 +709,17 @@ class BurnRatePlugin(AttnroutePlugin):
             total_cache_read += cr
 
             model = r.get("model", "unknown")
-            models[model] = models.get(model, 0) + billable
+            models[model] = models.get(model, 0) + total
 
             session_id = r.get("session_id", "unknown")
-            sessions[session_id] = sessions.get(session_id, 0) + billable
+            sessions[session_id] = sessions.get(session_id, 0) + total
 
             project = r.get("project", "unknown")
-            projects[project] = projects.get(project, 0) + billable
+            projects[project] = projects.get(project, 0) + total
 
-        # "Window tokens" = what likely counts toward rate limits.
-        # Input + output + cache creation are full-price tokens.
-        # Cache reads are heavily discounted (90%) and likely don't
-        # count fully against the window, so we exclude them from
-        # the primary metric but still report them.
-        window_tokens = total_input + total_output + total_cache_create
+        # All tokens count — cache reads are billed (at a lower rate)
+        # and must be visible for accurate cost tracking.
+        window_tokens = total_input + total_output + total_cache_create + total_cache_read
 
         return {
             "window_tokens": window_tokens,
@@ -775,11 +774,12 @@ class BurnRatePlugin(AttnroutePlugin):
         if elapsed_min < 0.5:
             return None  # Not enough time elapsed
 
-        # Sum billable tokens in rate window
+        # Sum all tokens in rate window (including cache reads)
         total = sum(
             r.get("input_tokens", 0)
             + r.get("output_tokens", 0)
             + r.get("cache_creation_tokens", 0)
+            + r.get("cache_read_tokens", 0)
             for r in recent
         )
 
@@ -1103,40 +1103,41 @@ class BurnRatePlugin(AttnroutePlugin):
                 # Convert UTC timestamp to local hour
                 local_ts = ts.astimezone()
                 local_hour = local_ts.hour
-                billable = (
+                total = (
                     r.get("input_tokens", 0)
                     + r.get("output_tokens", 0)
                     + r.get("cache_creation_tokens", 0)
+                    + r.get("cache_read_tokens", 0)
                 )
-                hours[local_hour] = hours.get(local_hour, 0) + billable
+                hours[local_hour] = hours.get(local_hour, 0) + total
 
             sessions.add(r.get("session_id", "unknown"))
 
             branch = r.get("git_branch", "")
             if branch:
-                billable = (
+                total = (
                     r.get("input_tokens", 0)
                     + r.get("output_tokens", 0)
                     + r.get("cache_creation_tokens", 0)
+                    + r.get("cache_read_tokens", 0)
                 )
-                branches[branch] = branches.get(branch, 0) + billable
+                branches[branch] = branches.get(branch, 0) + total
 
         # Sort peak hours descending
         peak_hours = sorted(hours.items(), key=lambda x: x[1], reverse=True)
 
         # Session stats
         n_sessions = len(sessions)
-        total_billable = sum(
+        total_all = sum(
             r.get("input_tokens", 0) + r.get("output_tokens", 0)
-            + r.get("cache_creation_tokens", 0)
+            + r.get("cache_creation_tokens", 0) + r.get("cache_read_tokens", 0)
             for r in records
         )
         total_cache_read = sum(r.get("cache_read_tokens", 0) for r in records)
 
-        # Cache hit rate: what fraction of all input was served from cache
-        total_input_all = total_billable + total_cache_read
+        # Cache hit rate: what fraction of all tokens were served from cache
         cache_hit_rate = (
-            total_cache_read / total_input_all if total_input_all else 0
+            total_cache_read / total_all if total_all else 0
         )
 
         # Busiest day
@@ -1149,7 +1150,7 @@ class BurnRatePlugin(AttnroutePlugin):
             "peak_hours": peak_hours[:5],  # Top 5 hours
             "sessions": n_sessions,
             "avg_tokens_per_session": (
-                round(total_billable / n_sessions) if n_sessions else 0
+                round(total_all / n_sessions) if n_sessions else 0
             ),
             "avg_cost_per_session": (
                 round(cost.get("total", 0) / n_sessions, 2)
@@ -1157,7 +1158,7 @@ class BurnRatePlugin(AttnroutePlugin):
             ),
             "active_days": active_days,
             "avg_tokens_per_active_day": (
-                round(total_billable / active_days) if active_days else 0
+                round(total_all / active_days) if active_days else 0
             ),
             "cache_hit_rate": round(cache_hit_rate, 3),
             "busiest_day": (

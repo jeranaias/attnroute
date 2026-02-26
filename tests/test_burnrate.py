@@ -275,8 +275,8 @@ class TestWindowStats:
 
         stats = plugin._compute_window_stats(records)
 
-        # Billable: (100+50+200) + (150+75+300) = 875
-        assert stats["window_tokens"] == 875
+        # All tokens: (100+50+200+10000) + (150+75+300+15000) = 25875
+        assert stats["window_tokens"] == 25875
         assert stats["input_tokens"] == 250
         assert stats["output_tokens"] == 125
         assert stats["cache_creation_tokens"] == 500
@@ -610,7 +610,7 @@ class TestPluginLifecycle:
 
         assert "BurnRate" in result
         assert "Active" in result
-        assert "7,000" in result  # 2 * (1000+500+2000) = 7000
+        assert "9,000" in result  # 2 * (1000+500+2000+1000) = 9000
 
     def test_no_warning_when_low_usage(self, plugin, mock_project):
         """Low usage produces no context injection."""
@@ -639,10 +639,10 @@ class TestPluginLifecycle:
 
         _write_jsonl(mock_project / "session.jsonl", lines)
 
-        plugin.on_session_start({})
+        plugin.on_session_start({"plan_type": "pro"})
         context = plugin.on_prompt_post("test", "", {})
 
-        # 100 * (300+200+500) = 100,000 > 90k threshold
+        # 100 * (300+200+500+1000) = 200,000 > 60% of 150k pro limit
         assert "BurnRate" in context
         assert "%" in context
 
@@ -676,7 +676,7 @@ class TestPluginLifecycle:
         summary = plugin.get_session_summary()
 
         assert summary["plan_type"] == "pro"
-        assert summary["window_tokens"] == 2500  # 10 * (100+50+100)
+        assert summary["window_tokens"] == 12500  # 10 * (100+50+100+1000)
         assert summary["api_calls_in_window"] == 10
         assert "tokens_per_minute" in summary
         assert summary["warnings_issued"] == 0
@@ -1791,10 +1791,10 @@ class TestBudgetUsage:
         _write_jsonl(mock_project / "session.jsonl", [today_entry, old_entry])
 
         daily, weekly = plugin._compute_budget_usage()
-        # Daily: only today's billable (1000 + 500 + 200) = 1700
-        assert daily == 1700
-        # Weekly: both records billable (1700 + 3500) = 5200
-        assert weekly == 5200
+        # Daily: only today's total (1000 + 500 + 200 + 100) = 1800
+        assert daily == 1800
+        # Weekly: both records total (1800 + 3500) = 5300
+        assert weekly == 5300
 
 
 # ------------------------------------------------------------------ #
