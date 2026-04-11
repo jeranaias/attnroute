@@ -237,6 +237,7 @@ class BurnRatePlugin(AttnroutePlugin):
 
     def on_prompt_pre(self, prompt: str, session_state: dict) -> tuple[str, bool]:
         """Pass through — we don't modify prompts."""
+        _ = session_state
         return prompt, True
 
     def on_prompt_post(
@@ -246,6 +247,9 @@ class BurnRatePlugin(AttnroutePlugin):
         session_state: dict,
     ) -> str:
         """Inject burn rate warning if approaching limits."""
+        _ = prompt
+        _ = context_output
+        _ = session_state
         state = self.load_state()
         now = datetime.now(timezone.utc)
 
@@ -311,6 +315,8 @@ class BurnRatePlugin(AttnroutePlugin):
 
     def on_stop(self, tool_calls: list[dict], session_state: dict) -> str | None:
         """Log sample to history after each turn. Once per day, compute weekly summary."""
+        _ = tool_calls
+        _ = session_state
         now = datetime.now(timezone.utc)
         records = self._scan_window(now)
         stats = self._compute_window_stats(records)
@@ -732,7 +738,7 @@ class BurnRatePlugin(AttnroutePlugin):
             "sessions": sessions,
             "projects": projects,
             "primary_model": (
-                max(models, key=models.get) if models else "unknown"
+                max(models, key=lambda k: models[k]) if models else "unknown"
             ),
         }
 
@@ -1605,7 +1611,7 @@ class BurnRatePlugin(AttnroutePlugin):
             for r in records:
                 fam = self._get_model_family(r.get("model", ""))
                 family_counts[fam] = family_counts.get(fam, 0) + 1
-            primary_family = max(family_counts, key=family_counts.get)
+            primary_family = max(family_counts, key=lambda k: family_counts[k])
 
         pricing = self.MODEL_PRICING.get(primary_family, self.MODEL_PRICING["sonnet"])
         flat_rate = pricing["cache_create_5m"]
