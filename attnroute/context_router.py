@@ -82,24 +82,54 @@ def get_learner():
     return _learner_loader.get()
 
 # Import search index with lazy initialization
-_indexer_imports, _INDEXER_IMPORTABLE = try_import(
-    "attnroute.indexer", "indexer", ["SearchIndex", "BM25_AVAILABLE"]
-)
-if _INDEXER_IMPORTABLE:
-    SearchIndex = _indexer_imports["SearchIndex"]
-    BM25_AVAILABLE = _indexer_imports["BM25_AVAILABLE"]
-    _search_loader = LazyLoader(lambda: SearchIndex())
-    SEARCH_AVAILABLE = BM25_AVAILABLE
-else:
-    _search_loader = None
-    SEARCH_AVAILABLE = False
-    BM25_AVAILABLE = False
+# ═══ THE SEARCH INDEX IS IMPORTED ONLY IF A PROMPT ACTUALLY SEARCHES ═══════════════════
+#
+# WARNING: `attnroute.indexer` costs 540 ms to import, 194 ms of it model2vec, and the old
+#   `try_import` here ran on EVERY PROMPT whether or not anything searched. `LazyLoader`
+#   deferred constructing the SearchIndex but not importing the module that defines it,
+#   which is where the time was.
+#
+#   Availability is now decided by `find_spec` on the two names the old flags stood for:
+#   the indexer module itself, and bm25s, which is what `indexer.BM25_AVAILABLE` tested.
+#   That answers the same question without executing either. A broken-but-installed
+#   dependency is caught at the use site, which is still inside a try.
+def _spec(name: str) -> bool:
+    """Is `name` importable? Answered WITHOUT executing it.
+
+    `find_spec` only locates the module, so this costs microseconds where the import costs
+    hundreds of milliseconds -- which is the whole reason the flags below are computed this
+    way. The import itself happens at the use site, still inside a try.
+    """
+    import importlib.util          # local: cheap after the first call, and keeps E402 out
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError, AttributeError):
+        return False
+
+
+BM25_AVAILABLE = _spec("bm25s")
+SEARCH_AVAILABLE = BM25_AVAILABLE and (_spec("attnroute.indexer") or _spec("indexer"))
+_search_index = None
+_search_index_tried = False
+
 
 def get_search_index():
-    """Get the lazily-initialized SearchIndex instance."""
-    if _search_loader is None:
+    """The SearchIndex, imported and constructed on first use. None when unavailable."""
+    global _search_index, _search_index_tried
+    if _search_index_tried:
+        return _search_index
+    _search_index_tried = True
+    if not SEARCH_AVAILABLE:
         return None
-    return _search_loader.get()
+    try:
+        try:
+            from attnroute.indexer import SearchIndex
+        except ImportError:
+            from indexer import SearchIndex
+        _search_index = SearchIndex()
+    except Exception:
+        _search_index = None
+    return _search_index
 
 def ensure_search_index_built():
     """Lazily build or update the search index if needed."""
@@ -195,16 +225,48 @@ def get_repo_mapper(project_root: str = None):
         print(f"[attnroute] Repo map init failed: {e}", file=sys.stderr)
         return None
 
-# Try to import networkx for graph-based co-activation
-try:
-    import networkx as nx
-    NETWORKX_AVAILABLE = True
-except ImportError:
-    nx = None
-    NETWORKX_AVAILABLE = False
+# ═══ networkx AND THE CO-ACTIVATION GRAPH ARE BUILT ON FIRST USE ═══════════════════════
+#
+# WARNING: THIS MODULE IS THE UserPromptSubmit HOOK. Importing networkx costs 840 ms and
+#   building the co-activation graph was done AT IMPORT TIME (see the end of this section's
+#   old line: `_coactivation_graph = build_coactivation_graph(...)`), so every prompt paid
+#   for a graph that only transitive co-activation reads.
+#
+#   `find_spec` answers "is networkx installed?" without executing it, so NETWORKX_AVAILABLE
+#   means what it always meant.
+NETWORKX_AVAILABLE = _spec("networkx")
 
-# Co-activation graph (built from CO_ACTIVATION dict using networkx)
+nx = None
+
+
+def _nx():
+    """networkx, imported on first use. None when unavailable."""
+    global nx
+    if nx is None and NETWORKX_AVAILABLE:
+        try:
+            import networkx as _module
+            nx = _module
+        except ImportError:
+            return None
+    return nx
+
+
+# Co-activation graph (built from CO_ACTIVATION dict using networkx), on first use.
 _coactivation_graph = None
+_coactivation_built = False
+
+
+def _coact_graph():
+    """The co-activation graph, built once, on demand."""
+    global _coactivation_graph, _coactivation_built
+    if not _coactivation_built:
+        _coactivation_built = True
+        if NETWORKX_AVAILABLE:
+            try:
+                _coactivation_graph = build_coactivation_graph(CO_ACTIVATION)
+            except Exception:
+                _coactivation_graph = None
+    return _coactivation_graph
 
 # ============================================================================
 # DOCS ROOT RESOLUTION
@@ -712,7 +774,7 @@ def build_coactivation_graph(co_act: dict):
     if not NETWORKX_AVAILABLE:
         return None
 
-    G = nx.Graph()
+    G = _nx().Graph()
     for source, targets in co_act.items():
         G.add_node(source)
         for target in targets:
@@ -727,7 +789,7 @@ def get_transitive_coactivation(activated_files: set[str], max_hops: int = 2) ->
 
     Returns: dict of {file_path: boost_score} where boost decays with distance
     """
-    if not NETWORKX_AVAILABLE or _coactivation_graph is None:
+    if not NETWORKX_AVAILABLE or _coact_graph() is None:
         return {}
 
     transitive = {}
@@ -737,7 +799,8 @@ def get_transitive_coactivation(activated_files: set[str], max_hops: int = 2) ->
 
         # BFS to find files within max_hops
         try:
-            lengths = nx.single_source_shortest_path_length(_coactivation_graph, source, cutoff=max_hops)
+            lengths = _nx().single_source_shortest_path_length(
+                _coact_graph(), source, cutoff=max_hops)
             for target, distance in lengths.items():
                 if target == source or target in activated_files:
                     continue
@@ -748,13 +811,13 @@ def get_transitive_coactivation(activated_files: set[str], max_hops: int = 2) ->
                     boost = TRANSITIVE_COACT_BOOST / distance
                 # Take max if file reachable from multiple sources
                 transitive[target] = max(transitive.get(target, 0), boost)
-        except nx.NetworkXError:
+        except _nx().NetworkXError:
             continue
 
     return transitive
 
 # Initialize the graph
-_coactivation_graph = build_coactivation_graph(CO_ACTIVATION) if NETWORKX_AVAILABLE else None
+# (built on first use by _coact_graph(); see the networkx section above)
 
 # Keyword weights placeholder (learner.boost_scores() handles learned associations instead)
 _KEYWORD_WEIGHTS: dict[str, float] = {}
@@ -1185,7 +1248,7 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
                     state["scores"][related_path] = min(1.0, current + COACTIVATION_BOOST)
 
     # Phase 3.5: Transitive co-activation (2-hop neighbors via graph)
-    if NETWORKX_AVAILABLE and _coactivation_graph is not None:
+    if NETWORKX_AVAILABLE and _coact_graph() is not None:
         transitive_boosts = get_transitive_coactivation(directly_activated, max_hops=2)
         for path, boost in transitive_boosts.items():
             if path in state["scores"]:

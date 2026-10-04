@@ -562,6 +562,74 @@ class BurnRatePlugin(AttnroutePlugin):
             return "sonnet"
         return "sonnet"  # Default to sonnet pricing
 
+    #: How far to rewind behind the binary search's answer before parsing. Transcript
+    #: timestamps are near-monotonic but not guaranteed to be, and a hook may be writing the
+    #: file while this reads it, so the search result is treated as approximate and backed
+    #: off by this much. 4 MB is ~1% of the largest transcript measured (322 MB) and still
+    #: covers thousands of lines.
+    SEEK_BACKOFF_BYTES = 4_000_000
+
+    #: Below this there is nothing to gain from seeking.
+    SEEK_MIN_FILE_BYTES = 8_000_000
+
+    #: How finely the search narrows before it stops. It used to stop as soon as the bracket
+    #: was under SEEK_BACKOFF_BYTES, which left up to the backoff AGAIN of slack -- so the
+    #: worst case parsed the window's share plus TWICE the backoff. A few more seeks are
+    #: free; parsing 4 MB is not.
+    SEEK_PROBE_BYTES = 262_144
+
+    def _window_first_byte(self, filepath: Path, window_start: datetime) -> int:
+        """Where the window begins in this file, as a byte offset. 0 when unsure.
+
+        WARNING: THIS IS THE WHOLE LATENCY FIX, AND IT IS APPROXIMATE ON PURPOSE.
+
+        A transcript is append-only and written in time order, so the lines belonging to a
+        5-hour window are a SUFFIX of the file. Parsing from byte zero -- which is what this
+        did -- spent 9.9 s per Stop event on lines that `window_start` then threw away.
+
+        Binary search needs ~20 seeks instead. It can be wrong in one direction only: the
+        answer is rewound by SEEK_BACKOFF_BYTES and any line before `window_start` is still
+        filtered by the caller, so a too-early offset costs a little parsing and a too-late
+        offset cannot happen within the backoff. On any error the answer is 0, which is
+        exactly the previous behaviour.
+
+        It does NOT assume every line has a timestamp: it scans forward from each probe for
+        the first line that does.
+        """
+        try:
+            size = filepath.stat().st_size
+            if size < self.SEEK_MIN_FILE_BYTES:
+                return 0
+            with open(filepath, "rb") as fh:
+                lo, hi = 0, size
+                while hi - lo > self.SEEK_PROBE_BYTES:
+                    mid = (lo + hi) // 2
+                    fh.seek(mid)
+                    fh.readline()                      # discard a partial line
+                    ts = None
+                    for _ in range(50):                # a line with a timestamp, or give up
+                        raw = fh.readline()
+                        if not raw:
+                            break
+                        if b'"timestamp"' not in raw:
+                            continue
+                        try:
+                            ts = self._parse_timestamp(
+                                json.loads(raw.decode("utf-8", "replace")).get("timestamp"))
+                        except (ValueError, TypeError, AttributeError):
+                            ts = None
+                        if ts is not None:
+                            break
+                    if ts is None:
+                        break                          # unreadable region: stop narrowing
+                    if ts < window_start:
+                        lo = mid
+                    else:
+                        hi = mid
+                return max(0, lo - self.SEEK_BACKOFF_BYTES)
+        except (OSError, ValueError):
+            return 0
+
     def _extract_usage_records(
         self,
         filepath: Path,
@@ -580,6 +648,10 @@ class BurnRatePlugin(AttnroutePlugin):
 
         try:
             with open(filepath, encoding="utf-8") as f:
+                start = self._window_first_byte(filepath, window_start)
+                if start:
+                    f.seek(start)
+                    f.readline()               # discard a partial line
                 for line in f:
                     # Fast pre-filter — skip lines that can't have usage data
                     if '"usage"' not in line:
