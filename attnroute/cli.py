@@ -442,12 +442,14 @@ def cmd_validate(args):
 
 
 def cmd_note(args):
-    """Record something this session decided, so compaction cannot lose it."""
+    """Record, correct or delete something this session decided."""
     from attnroute.session_state import (
         KINDS,
         add_note,
+        amend_note,
         check_promotion,
         load,
+        remove_note,
         save,
         session_from_env,
     )
@@ -465,8 +467,44 @@ def cmd_note(args):
         return 1
     text = args.text
     if not text or not text.strip():
-        print("[attnroute] refusing to record an empty note", file=sys.stderr)
+        # The positional carries a note for `add` and an id for rm/amend, so the complaint
+        # has to name the right thing.
+        print("[attnroute] " + ("rm and amend need a note id (an unambiguous prefix will "
+                                "do); `attnroute state show` lists them"
+                                if args.subcommand in ("rm", "amend")
+                                else "refusing to record an empty note"), file=sys.stderr)
         return 1
+
+    if args.subcommand == "rm":
+        # `text` carries the id for rm and amend: one positional, three subcommands.
+        done = remove_note(state, text)
+        if not done["removed"]:
+            print(f"[attnroute] {done['why']}", file=sys.stderr)
+            return 1
+        save(session, state)
+        gone = done["removed"]
+        print(f"[attnroute] deleted {gone['kind']} {gone['id']}: {gone['text'][:60]}",
+              file=sys.stderr)
+        return 0
+
+    if args.subcommand == "amend":
+        if not args.text_new or not args.text_new.strip():
+            print("[attnroute] amend needs the corrected text as a second argument",
+                  file=sys.stderr)
+            return 1
+        done = amend_note(state, text, args.text_new,
+                          kind=args.kind if args.kind != "note" else None,
+                          promoted_to=args.promoted_to)
+        if not done["note"]:
+            print(f"[attnroute] {done['why']}", file=sys.stderr)
+            return 1
+        save(session, state)
+        note, old = done["note"], done["superseded"]
+        promotion = check_promotion(note, args.repo or ".")
+        print(f"[attnroute] {note['id']} supersedes {old['id']}; the original is kept and "
+              f"is no longer handed back. {promotion['state']} ({promotion['why']})",
+              file=sys.stderr)
+        return 1 if promotion["state"] == "CLAIMED" else 0
 
     note = add_note(state, text, kind=args.kind, promoted_to=args.promoted_to,
                     source=args.source)
@@ -521,10 +559,18 @@ def cmd_state(args):
     counts = {}
     for note in notes:
         promotion = check_promotion(note, repo)
-        counts[promotion["state"]] = counts.get(promotion["state"], 0) + 1
-        print(f"{promotion['state']:<11} {note['kind']:<12} {note['at']}  {note['text']}")
+        key = "SUPERSEDED" if note.get("superseded_by") else promotion["state"]
+        counts[key] = counts.get(key, 0) + 1
+        # WARNING: THE ID HAS TO BE HERE. `note rm` and `note amend` take an id, and this
+        #   listing was the only place to find one -- and it printed everything about a note
+        #   except its id, so both commands were unusable by anyone who had not kept the
+        #   output of `note add`. Same mistake as a notice that names an escape hatch it
+        #   does not provide.
+        marker = "  SUPERSEDED by " + note["superseded_by"] if note.get("superseded_by") else ""
+        print(f"{note['id']:<16} {promotion['state']:<11} {note['kind']:<12} "
+              f"{note['at']}  {note['text']}{marker}")
         if promotion["state"] == "CLAIMED":
-            print(f"            ^ {promotion['why']}")
+            print(f"{'':<16} ^ {promotion['why']}")
     print("[attnroute] " + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())),
           file=sys.stderr)
     return 0
@@ -781,9 +827,14 @@ For more information, visit: https://github.com/jeranaias/attnroute
     # note command
     note_parser = subparsers.add_parser(
         "note", help="Record a ruling or decision so compaction cannot lose it")
-    note_parser.add_argument("subcommand", nargs="?", default="add", choices=["add"],
-                             help="Only `add` for now")
-    note_parser.add_argument("text", nargs="?", default=None, help="The note itself")
+    note_parser.add_argument("subcommand", nargs="?", default="add",
+                             choices=["add", "rm", "amend"],
+                             help="add a note, delete one, or supersede one")
+    note_parser.add_argument("text", nargs="?", default=None,
+                             help="The note itself for `add`; the note id for rm/amend "
+                                  "(an unambiguous prefix will do)")
+    note_parser.add_argument("text_new", nargs="?", default=None,
+                             help="The corrected text, for `amend`")
     note_parser.add_argument("--kind", type=str, default="note",
                              help="ruling, decision, blocker, measurement, next or note")
     note_parser.add_argument("--promoted-to", dest="promoted_to", type=str, default=None,
