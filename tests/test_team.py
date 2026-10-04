@@ -134,27 +134,57 @@ class TestTheResolverDoesNotRelocateAPath:
 
 
 class TestACollidingMappingIsRefusedNotGuessed:
-    """⚠ THE BUG MY FIRST VERSION HAD. Comparison is case- and separator-insensitive, so two
-    differently spelled keys can mean one directory. A plain dict kept the last one and filed
-    one team's sessions under another with nothing to show it."""
+    """⚠ TWO BUGS LIVE IN THIS CLASS'S HISTORY.
 
-    def test_two_spellings_naming_two_teams_is_reported(self, mapping):
-        p = mapping({"/work/a": "T1", "/work" + BS + "A": "T2"})
+    First: two differently spelled keys can mean one directory, and a plain dict kept
+    whichever came last, filing one team's sessions under another with nothing to show it.
+
+    Then: these tests were written with CASE variants, which are one directory on Windows
+    and two on POSIX. So after `normcase` went in -- correctly -- they were asserting a
+    Windows fact on every platform, and went red on Linux and macOS where there was no
+    collision to report.
+
+    The platform-independent collisions are the ones that survive normalisation everywhere:
+    a trailing slash and a `./` segment. The case variants stay, marked Windows-only,
+    because on Windows they are a real and likely mistake in a hand-written file.
+    """
+
+    @pytest.mark.parametrize("second", ["/work/a/", "/work/./a", "/work//a"])
+    def test_two_spellings_of_one_directory_naming_two_teams_is_reported(
+            self, mapping, second):
+        """These spellings are the same directory on every platform."""
+        p = mapping({"/work/a": "T1", second: "T2"})
         found = tm.team_for("/work/a/b", env={}, map_file=p)
         assert found["team"] is None, "a colliding mapping must not resolve to either team"
         assert "ambiguous" in found["why"]
         assert "T1" in found["why"] and "T2" in found["why"]
 
-    def test_two_spellings_naming_the_SAME_team_is_fine(self, mapping):
+    def test_two_spellings_of_one_directory_naming_the_SAME_team_is_fine(self, mapping):
         """Positive control: the check must not refuse a merely redundant mapping."""
-        p = mapping({"/work/a": "T1", "/work/A/": "T1"})
+        p = mapping({"/work/a": "T1", "/work/a/": "T1"})
         assert tm.team_for("/work/a/b", env={}, map_file=p)["team"] == "T1"
 
     def test_a_collision_elsewhere_still_refuses_the_whole_file(self, mapping):
         """Deliberate: a file with a contradiction in it is not trustworthy in its other
         rows either, and a half-used mapping is harder to reason about than a refused one."""
-        p = mapping({"/work/a": "T1", "/work/A": "T2", "/work/b": "T3"})
+        p = mapping({"/work/a": "T1", "/work/./a": "T2", "/work/b": "T3"})
         assert tm.team_for("/work/b", env={}, map_file=p)["team"] is None
+
+    @pytest.mark.skipif(os.name != "nt", reason="case variants are one directory on Windows "
+                                                "and two on POSIX")
+    def test_case_variants_collide_on_windows(self, mapping):
+        p = mapping({"/work/a": "T1", "/work" + BS + "A": "T2"})
+        found = tm.team_for("/work/a/b", env={}, map_file=p)
+        assert found["team"] is None
+        assert "ambiguous" in found["why"]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX paths are case-sensitive")
+    def test_case_variants_are_two_directories_on_posix(self, mapping):
+        """The counterpart: not a collision at all, so both rows stand and each path gets
+        its own team. Refusing here would be the bug."""
+        p = mapping({"/work/a": "T1", "/work/A": "T2"})
+        assert tm.team_for("/work/a/b", env={}, map_file=p)["team"] == "T1"
+        assert tm.team_for("/work/A/b", env={}, map_file=p)["team"] == "T2"
 
 
 class TestAMissingOrBrokenMappingSaysSo:
