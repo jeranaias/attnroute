@@ -66,11 +66,11 @@ def _stream(tmp_path, records):
 
 class TestAnalyse:
     def test_positive_control_a_cheaper_treated_group_shows_a_saving(self, tmp_path):
-        ts = [_write_transcript(tmp_path / f"t{i}.jsonl", f"T{i}", 20, 600 + i) for i in range(4)]
-        bs = [_write_transcript(tmp_path / f"b{i}.jsonl", f"B{i}", 20, 1000 + i) for i in range(4)]
-        st = _stream(tmp_path, [{"session_id": f"T{i}", "acting": True} for i in range(4)])
+        ts = [_write_transcript(tmp_path / f"t{i}.jsonl", f"T{i}", 20, 600 + i) for i in range(5)]
+        bs = [_write_transcript(tmp_path / f"b{i}.jsonl", f"B{i}", 20, 1000 + i) for i in range(5)]
+        st = _stream(tmp_path, [{"session_id": f"T{i}", "acting": True} for i in range(5)])
         res = savings.analyse(transcripts=ts + bs, stream=st)
-        assert res["groups"]["treated"]["sessions"] == 4
+        assert res["groups"]["treated"]["sessions"] == 5
         assert 0.35 < res["saving_per_turn"] < 0.45
         lo, hi = res["ci95"]
         assert lo > 0                                    # established
@@ -88,12 +88,12 @@ class TestAnalyse:
         assert "NOT CHECKED" in savings.render(res)
 
     def test_noisy_equal_groups_are_not_established(self, tmp_path):
-        vals_t, vals_b = [500, 1500, 900, 1100], [1400, 600, 1000, 1000]
+        vals_t, vals_b = [500, 1500, 900, 1100, 1000], [1400, 600, 1000, 1000, 1000]
         ts = [_write_transcript(tmp_path / f"t{i}.jsonl", f"T{i}", 20, v)
               for i, v in enumerate(vals_t)]
         bs = [_write_transcript(tmp_path / f"b{i}.jsonl", f"B{i}", 20, v)
               for i, v in enumerate(vals_b)]
-        st = _stream(tmp_path, [{"session_id": f"T{i}", "acting": True} for i in range(4)])
+        st = _stream(tmp_path, [{"session_id": f"T{i}", "acting": True} for i in range(5)])
         out = savings.render(savings.analyse(transcripts=ts + bs, stream=st))
         assert "NOT ESTABLISHED" in out
 
@@ -105,6 +105,48 @@ class TestAnalyse:
         assert "ESTIMATES" in out and "not evidence" in out
 
 
+class TestHonesty:
+    def test_too_few_sessions_gives_no_interval(self, tmp_path):
+        ts = [_write_transcript(tmp_path / f"t{i}.jsonl", f"T{i}", 20, 600) for i in range(2)]
+        bs = [_write_transcript(tmp_path / f"b{i}.jsonl", f"B{i}", 20, 1000) for i in range(2)]
+        st = _stream(tmp_path, [{"session_id": f"T{i}", "acting": True} for i in range(2)])
+        res = savings.analyse(transcripts=ts + bs, stream=st)
+        assert res["ci95"] is None
+        assert "TOO FEW SESSIONS FOR AN INTERVAL (n=2 vs 2" in savings.render(res)
+
+    def test_repeats_column_is_labelled_a_floor(self, tmp_path):
+        bs = [_write_transcript(tmp_path / "b.jsonl", "B", 5, 100)]
+        assert "FLOOR" in savings.render(savings.analyse(transcripts=bs,
+                                                         stream=_stream(tmp_path, [])))
+
+
+class TestArmContrast:
+    def test_positive_control_cap_arm_measured_from_result_sizes(self):
+        recs = ([{"component": "output_cap", "event": "output_cap:result", "acting": True,
+                  "arm": "cap", "chars": 4000}] * 9
+                + [{"component": "output_cap", "event": "output_cap:result", "acting": True,
+                    "arm": "held-out", "chars": 10000}])
+        a = savings.arm_contrast(recs)["output_cap"]
+        assert a["treated"] == 4000 and a["control"] == 10000 and abs(a["saving"] - 0.6) < 1e-9
+
+    def test_ledger_arm_is_result_tokens_per_decision(self):
+        recs = ([{"component": "read_ledger", "event": "read_ledger", "acting": True,
+                  "arm": "ledger"}] * 4
+                + [{"component": "read_ledger", "event": "read_result", "acting": True,
+                    "arm": "ledger", "tokens": 1000}] * 2
+                + [{"component": "read_ledger", "event": "read_ledger", "acting": True,
+                    "arm": "held-out-file"}] * 2
+                + [{"component": "read_ledger", "event": "read_result", "acting": True,
+                    "arm": "held-out-file", "tokens": 1000}] * 2)
+        a = savings.arm_contrast(recs)["read_ledger"]
+        assert a["treated"] == 500 and a["control"] == 1000
+
+    def test_observing_records_never_make_a_contrast(self):
+        recs = [{"component": "output_cap", "event": "output_cap:result", "acting": False,
+                 "arm": a, "chars": 10} for a in ("cap", "held-out")]
+        assert savings.arm_contrast(recs) == {}
+
+
 class TestStream:
     def test_emit_round_trips_with_schema_fields(self, tmp_path, monkeypatch):
         monkeypatch.setattr(telemetry_stream, "stream_path", lambda: tmp_path / "s.jsonl")
@@ -113,6 +155,13 @@ class TestStream:
         recs = list(telemetry_stream.read(tmp_path / "s.jsonl"))
         assert recs[0]["v"] == telemetry_stream.SCHEMA_VERSION
         assert recs[0]["component"] == "output_cap" and recs[0]["chars"] == 10
+
+    def test_other_schema_version_is_skipped_and_counted(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_text('{"component": "x", "v": 1}\n{"component": "x", "v": 2}\n',
+                     encoding="utf-8")
+        assert len(list(telemetry_stream.read(p))) == 1
+        assert telemetry_stream.SKIPPED["foreign_version"] == 1
 
     def test_torn_line_is_skipped_not_fatal(self, tmp_path):
         p = tmp_path / "s.jsonl"

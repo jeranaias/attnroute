@@ -131,6 +131,48 @@ def stream_summary(records) -> dict:
             "missed": missed[:5], "latencies_ms": lat}
 
 
+MIN_SESSIONS_FOR_CI = 5
+
+CONTROL_ARMS = ("held-out", "held-out-file", "held-out-turn")
+
+
+def arm_contrast(records) -> dict:
+    """The HEADLINE for the read-side levers: same session, same task, same window, split only
+    by a deterministic sha256 holdout. Measured result sizes, not the levers' estimates.
+
+      read_ledger  tokens actually put into context by Read, per Read decision, per arm
+      output_cap   characters actually returned by Bash, per command, per arm
+
+    Only ACTING records count: while observing, both arms are untouched and equal by design.
+    """
+    out = {}
+    led = {"t": [0, 0], "c": [0, 0]}          # [result tokens, decisions]
+    cap = {"t": [], "c": []}
+    for r in records:
+        if not r.get("acting"):
+            continue
+        arm = r.get("arm")
+        side = "c" if arm in CONTROL_ARMS else "t" if arm in ("ledger", "cap") else None
+        if side is None:
+            continue
+        if r.get("component") == "read_ledger":
+            if r.get("event") == "read_ledger":
+                led[side][1] += 1
+            elif r.get("event") == "read_result":
+                led[side][0] += int(r.get("tokens") or 0)
+        elif r.get("component") == "output_cap" and str(r.get("event", "")).endswith("result"):
+            cap[side].append(int(r.get("chars") or 0))
+    if led["t"][1] and led["c"][1]:
+        t, c = led["t"][0] / led["t"][1], led["c"][0] / led["c"][1]
+        out["read_ledger"] = {"treated": t, "control": c, "n_t": led["t"][1],
+                              "n_c": led["c"][1], "saving": (1 - t / c) if c else None}
+    if cap["t"] and cap["c"]:
+        t, c = sum(cap["t"]) / len(cap["t"]), sum(cap["c"]) / len(cap["c"])
+        out["output_cap"] = {"treated": t, "control": c, "n_t": len(cap["t"]),
+                             "n_c": len(cap["c"]), "saving": (1 - t / c) if c else None}
+    return out
+
+
 def _group(sid, sessions) -> str:
     s = sessions.get(sid)
     if not s:
@@ -145,7 +187,7 @@ def _per_turn(rows):
 
 def bootstrap_ci(treated, baseline, n=2000, seed=7):
     """95% interval on (treated per-turn cost / baseline per-turn cost - 1), resampling sessions."""
-    if len(treated) < 2 or len(baseline) < 2:
+    if len(treated) < MIN_SESSIONS_FOR_CI or len(baseline) < MIN_SESSIONS_FOR_CI:
         return None
     rng = random.Random(seed)
     out = []
@@ -184,7 +226,8 @@ def analyse(project_filter=None, transcripts=None, stream=None) -> dict:
                 "repeats_per_compaction": (sum(r["repeats"] for r in rs) / comps) if comps else None}
 
     out = {"groups": {g: agg(rs) for g, rs in groups.items()}, "stream": ss,
-           "stream_records": len(records)}
+           "stream_records": len(records), "skipped": dict(telemetry_stream.SKIPPED),
+           "arms": arm_contrast(records)}
     t, b = groups.get("treated", []), groups.get("baseline", [])
     pt, pb = _per_turn(t), _per_turn(b)
     out["saving_per_turn"] = (1.0 - pt / pb) if (pt is not None and pb) else None
@@ -201,10 +244,22 @@ def _fmt(x, pct=False, digits=1):
 
 def render(res: dict) -> str:
     L = []
-    L.append("attnroute savings -- measured from transcript usage (cost units = relative price)")
+    L.append("attnroute savings -- measured, not estimated")
     L.append("")
+    L.append("HEADLINE: within-session arm contrast (same session and task, sha256 holdout):")
+    arms = res.get("arms") or {}
+    for comp, unit in (("read_ledger", "tok/read"), ("output_cap", "chars/cmd")):
+        a = arms.get(comp)
+        if not a:
+            L.append(f"  {comp:<12} NOT CHECKED -- no acting records in both arms yet")
+            continue
+        L.append(f"  {comp:<12} treated {a['treated']:,.0f} vs control {a['control']:,.0f} "
+                 f"{unit}  saving {_fmt(a['saving'], True)}  (n {a['n_t']} vs {a['n_c']})")
+    L.append("")
+    L.append("SECONDARY, CONFOUNDED: across sessions (different tasks; cadence lever lives here)")
+    L.append("  cost units = 0.1 cache_read + 1.25 cache_creation + input + 5 output, from usage")
     L.append(f"{'group':<10} {'sessions':>8} {'turns':>9} {'units/turn':>12} "
-             f"{'turns/window':>13} {'repeats/compaction':>19}")
+             f"{'turns/window':>13} {'repeats/compact*':>19}")
     for g in ("treated", "observed", "baseline"):
         a = res["groups"].get(g)
         if not a:
@@ -217,10 +272,16 @@ def render(res: dict) -> str:
     if s is None:
         L.append("SAVING per turn (treated vs baseline): NOT CHECKED -- a group is empty")
     else:
+        nt = res["groups"].get("treated", {}).get("sessions", 0)
+        nb = res["groups"].get("baseline", {}).get("sessions", 0)
         verdict = ("NOT ESTABLISHED (interval crosses zero)" if ci and ci[0] <= 0 <= ci[1]
-                   else "established" if ci else "NO INTERVAL (fewer than 2 sessions per group)")
+                   else "established (confounded)" if ci
+                   else f"TOO FEW SESSIONS FOR AN INTERVAL (n={nt} vs {nb}, "
+                        f"need {MIN_SESSIONS_FOR_CI} each)")
         cis = f"[{_fmt(ci[0], True)}, {_fmt(ci[1], True)}]" if ci else "n/a"
         L.append(f"SAVING per turn (treated vs baseline): {_fmt(s, True)}  95% CI {cis}  {verdict}")
+    L.append("  * repeats/compaction is a FLOOR on quality cost: it counts repeated tool calls and")
+    L.append("    cannot see a ruling re-derived or contradicted.")
     L.append("")
     L.append("ESTIMATES from the levers' own logs (not evidence of a saving):")
     for comp, d in sorted(res["stream"]["estimates"].items()):
@@ -236,5 +297,8 @@ def render(res: dict) -> str:
     if not res["stream"]["missed"]:
         L.append("  none recorded")
     L.append("")
-    L.append(f"stream records read: {res['stream_records']}  (best-effort writes; drops possible)")
+    sk = res.get("skipped") or {}
+    L.append(f"stream records read: {res['stream_records']}  skipped: {sk.get('torn', 0)} torn, "
+             f"{sk.get('foreign_version', 0)} other-version  (best-effort writes; a session whose "
+             f"records all dropped is misgrouped as baseline)")
     return "\n".join(L)

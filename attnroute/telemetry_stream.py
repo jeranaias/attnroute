@@ -49,8 +49,15 @@ def emit(component: str, event: str, *, session_id=None, agent_id=None, arm=None
         pass
 
 
+#: Lines read() could not use, by reason, from its most recent call. A reader that silently
+#: skipped a newer schema would read changed meanings as old ones, so skips are COUNTED.
+SKIPPED = {"torn": 0, "foreign_version": 0}
+
+
 def read(path=None):
-    """Yield every well-formed record. A torn or foreign line is skipped, not fatal."""
+    """Yield every well-formed record of THIS schema version. Torn lines and records of another
+    version are skipped and counted in SKIPPED, never guessed at."""
+    SKIPPED["torn"] = SKIPPED["foreign_version"] = 0
     p = Path(path) if path else stream_path()
     try:
         fh = open(p, encoding="utf-8")
@@ -61,6 +68,12 @@ def read(path=None):
             try:
                 rec = json.loads(line)
             except ValueError:
+                SKIPPED["torn"] += 1
                 continue
-            if isinstance(rec, dict) and "component" in rec:
-                yield rec
+            if not (isinstance(rec, dict) and "component" in rec):
+                SKIPPED["torn"] += 1
+                continue
+            if rec.get("v") != SCHEMA_VERSION:
+                SKIPPED["foreign_version"] += 1
+                continue
+            yield rec

@@ -540,9 +540,15 @@ def handle(payload: dict) -> dict | None:
             led.on_edit(str(ti.get("file_path") or ti.get("notebook_path") or ""))
         elif tool == "Read" and ti.get("file_path"):
             key = read_key(str(ti["file_path"]), ti.get("offset"), ti.get("limit"))
+            tokens = response_tokens(payload)
+            # The MEASURED side of the arm contrast: what each read actually put into context,
+            # tagged with the arm it was decided in. Reads the ledger denied never get here.
+            _log({"event": "read_result", "key": key, "tokens": tokens, "acting": acting(),
+                  "session_id": payload.get("session_id"), "agent_id": payload.get("agent_id"),
+                  **holdout(sid, key, led.state.get("turn", 0))})
             if not led.take_shadow_deny(key):
                 led.record(str(ti["file_path"]), ti.get("offset"), ti.get("limit"),
-                           tokens=response_tokens(payload))
+                           tokens=tokens)
 
     save(sid, led)
     return out
