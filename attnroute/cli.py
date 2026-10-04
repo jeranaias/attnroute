@@ -430,6 +430,75 @@ def cmd_validate(args):
     return 1 if errors else 0
 
 
+def cmd_note(args):
+    """Record something this session decided, so compaction cannot lose it."""
+    from attnroute.session_state import KINDS, add_note, check_promotion, load, save
+
+    session = args.session or os.environ.get("CLAUDE_SESSION_ID", "") or "local"
+    state = load(session)
+    if args.kind not in KINDS:
+        print(f"[attnroute] kind must be one of: {', '.join(KINDS)}", file=sys.stderr)
+        return 1
+    text = args.text
+    if not text or not text.strip():
+        print("[attnroute] refusing to record an empty note", file=sys.stderr)
+        return 1
+
+    note = add_note(state, text, kind=args.kind, promoted_to=args.promoted_to,
+                    source=args.source)
+    save(session, state)
+
+    promotion = check_promotion(note, args.repo or ".")
+    print(f"[attnroute] recorded {note['kind']} {note['id']}: {promotion['state']} "
+          f"({promotion['why']})", file=sys.stderr)
+    # ⚠ An unsupported claim is reported as a FAILURE of the command, not a detail in
+    #   passing. "promoted_to: docs/x.md" when docs/x.md says nothing about this note is
+    #   worse than no claim at all, because every listing afterwards reads it as filed.
+    return 1 if promotion["state"] == "CLAIMED" else 0
+
+
+def cmd_state(args):
+    """Show what would be handed to the next context window."""
+    import json as _json
+
+    from attnroute.session_state import (
+        TOKEN_BUDGET,
+        check_promotion,
+        handback,
+        load,
+    )
+
+    session = args.session or os.environ.get("CLAUDE_SESSION_ID", "") or "local"
+    state = load(session)
+    repo = args.repo or "."
+
+    if args.subcommand == "handback":
+        built = handback(state, {}, repo=repo)
+        if args.json:
+            print(_json.dumps(built, indent=2))
+            return 0
+        print(built["text"])
+        print(f"[attnroute] {built['tokens']} of {TOKEN_BUDGET} tokens, "
+              f"{built['dropped']} item(s) dropped", file=sys.stderr)
+        return 0
+
+    # `show` lists EVERYTHING, which is what the handback's drop notice points people to.
+    notes = state.get("notes") or []
+    if not notes:
+        print(f"[attnroute] no notes recorded for session {session}", file=sys.stderr)
+        return 1
+    counts = {}
+    for note in notes:
+        promotion = check_promotion(note, repo)
+        counts[promotion["state"]] = counts.get(promotion["state"], 0) + 1
+        print(f"{promotion['state']:<11} {note['kind']:<12} {note['at']}  {note['text']}")
+        if promotion["state"] == "CLAIMED":
+            print(f"            ^ {promotion['why']}")
+    print("[attnroute] " + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())),
+          file=sys.stderr)
+    return 0
+
+
 def cmd_board(args):
     """Read or publish a row on the shared team board.
 
@@ -653,6 +722,32 @@ For more information, visit: https://github.com/jeranaias/attnroute
                                 help="Plugin subcommand (default: list)")
     plugins_parser.add_argument("name", nargs="?", help="Plugin name (for enable/disable/status)")
 
+    # note command
+    note_parser = subparsers.add_parser(
+        "note", help="Record a ruling or decision so compaction cannot lose it")
+    note_parser.add_argument("subcommand", nargs="?", default="add", choices=["add"],
+                             help="Only `add` for now")
+    note_parser.add_argument("text", nargs="?", default=None, help="The note itself")
+    note_parser.add_argument("--kind", type=str, default="note",
+                             help="ruling, decision, blocker, measurement, next or note")
+    note_parser.add_argument("--promoted-to", dest="promoted_to", type=str, default=None,
+                             help="Path where this now lives permanently (checked)")
+    note_parser.add_argument("--source", type=str, default=None,
+                             help="Where it came from, e.g. a PR or a message")
+    note_parser.add_argument("--session", type=str, default=None,
+                             help="Session id (default: $CLAUDE_SESSION_ID, else 'local')")
+    note_parser.add_argument("--repo", type=str, default=None,
+                             help="Repository the promotion path is relative to")
+
+    # state command
+    state_parser = subparsers.add_parser(
+        "state", help="Show the session state, or the handback it would produce")
+    state_parser.add_argument("subcommand", nargs="?", default="show",
+                              choices=["show", "handback"])
+    state_parser.add_argument("--session", type=str, default=None)
+    state_parser.add_argument("--repo", type=str, default=None)
+    state_parser.add_argument("--json", action="store_true")
+
     # board command
     board_parser = subparsers.add_parser(
         "board", help="Read or publish a row on the shared team board")
@@ -717,6 +812,8 @@ For more information, visit: https://github.com/jeranaias/attnroute
         "diagnostic": cmd_diagnostic,
         "plugins": cmd_plugins,
         "board": cmd_board,
+        "note": cmd_note,
+        "state": cmd_state,
         "ingest": cmd_ingest,
         "validate": cmd_validate,
         "warmup": cmd_warmup,
