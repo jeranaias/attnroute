@@ -38,6 +38,49 @@ try:
 except ImportError:
     LANGUAGE_PACK_AVAILABLE = False
 
+
+# ── WHAT THE OUTLINER CAN ACTUALLY DO, AS A VALUE RATHER THAN TWO SILENT BOOLEANS ──────────
+#
+# `extract_outline` degrades to a regex fallback when the tree-sitter language pack is absent,
+# and nothing used to say so: both flags were set in an `except ImportError` and never surfaced.
+# A caller could not tell a tree-sitter outline from a regex one, and `attnroute status` listed
+# only the features that WERE present, so a degraded install printed a shorter list and read as
+# complete.
+#
+# THE ABSENT CASE IS THE ONE THAT NEEDS SAYING. An absence that is not stated reads as "nothing
+# to report", which is how a disabled capability goes unnoticed for months.
+#
+# tree-sitter-languages publishes version-specific wheels (cp310/cp311/cp312) and stopped at
+# 3.12, so on 3.13+ the pack cannot be installed at all and the fallback is the ONLY path.
+OUTLINE_BACKEND_TREE_SITTER = "tree-sitter"
+OUTLINE_BACKEND_REGEX = "regex-fallback"
+OUTLINE_BACKEND_NONE = "unavailable"
+
+#: Signature lines a fallback outline may carry, INCLUDING its header and any truncation note.
+FALLBACK_MAX_LINES = 100
+
+
+def outline_backend() -> tuple[str, str]:
+    """Which outline path is live, and why. -> (backend, reason)
+
+    The reason is always populated, including when the backend is the full one, so a caller
+    never has to infer the state from an empty string.
+    """
+    if TREE_SITTER_AVAILABLE and LANGUAGE_PACK_AVAILABLE:
+        return OUTLINE_BACKEND_TREE_SITTER, "tree-sitter and the language pack are both importable"
+    if not TREE_SITTER_AVAILABLE and not LANGUAGE_PACK_AVAILABLE:
+        return (OUTLINE_BACKEND_REGEX,
+                "neither tree_sitter nor tree_sitter_languages could be imported; "
+                "outlines come from the regex fallback (.py and .js/.ts only)")
+    if not LANGUAGE_PACK_AVAILABLE:
+        return (OUTLINE_BACKEND_REGEX,
+                "tree_sitter is importable but tree_sitter_languages is not -- it publishes no "
+                "wheel for this Python, so outlines come from the regex fallback "
+                "(.py and .js/.ts only)")
+    return (OUTLINE_BACKEND_REGEX,
+            "tree_sitter_languages is importable but tree_sitter is not; outlines come from the "
+            "regex fallback (.py and .js/.ts only)")
+
 # Language file extension mapping
 LANGUAGE_MAP = {
     ".py": "python",
@@ -441,7 +484,19 @@ def _fallback_outline(file_path: Path) -> str | None:
     if len(lines) <= 1:
         return None
 
-    return "\n".join(lines[:100])  # Cap at 100 lines
+    # ⚠ SAY SO WHEN THE CAP DROPS SIGNATURES. An outline IS a search result, and a truncated
+    #   one with no marker lets a reader conclude a symbol is ABSENT when it was merely past
+    #   the cut. Measured on a real file: gcs/serve.py in the Meridian repo produced exactly
+    #   100 lines from 58,569 tokens, with nothing saying more existed.
+    #   The cap still holds: the note occupies the last of the FALLBACK_MAX_LINES.
+    if len(lines) > FALLBACK_MAX_LINES:
+        kept = lines[:FALLBACK_MAX_LINES - 1]
+        dropped = len(lines) - len(kept)
+        kept.append(f"# ... truncated: {len(kept)} of {len(lines)} outline lines shown, "
+                    f"{dropped} not shown (regex fallback cap)")
+        return "\n".join(kept)
+
+    return "\n".join(lines)
 
 
 # ============================================================================
