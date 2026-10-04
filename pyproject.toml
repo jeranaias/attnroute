@@ -93,6 +93,13 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # Tests that drive real `git` in real repositories. They are the only honest way to
+    # check the team board -- two writers racing is the property, and a mocked git cannot
+    # show it -- but they cost ~83 s, so CI runs them on one Linux and one Windows job
+    # rather than on all fourteen.
+    "realgit: drives real git repositories (slow; a subset of CI jobs)",
+]
 
 [tool.mypy]
 python_version = "3.10"

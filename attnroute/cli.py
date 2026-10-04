@@ -430,6 +430,65 @@ def cmd_validate(args):
     return 1 if errors else 0
 
 
+def cmd_board(args):
+    """Read or publish a row on the shared team board.
+
+    WRITING IS A COMMAND AND NOT A HOOK, on purpose. A write pushes, and a hook may not
+    touch the network: see attnroute/no_egress.py for what happened the last time one did.
+    Reading is the opposite -- the SessionStart hook reads the local `origin/board` ref and
+    never fetches, so a row carries its own age instead of pretending to be current.
+    """
+    import json as _json
+
+    from attnroute.board import BoardError, read, write, writers
+
+    repo = args.repo or "."
+    try:
+        if args.subcommand == "get":
+            row = read(args.team, repo=repo)
+            if args.json:
+                print(_json.dumps(row, indent=2))
+                return 0
+            if not row["text"]:
+                print(f"[attnroute] no row: {row['why']}", file=sys.stderr)
+                return 1
+            age = "" if row["age_hours"] is None else f" ({row['age_hours']:.1f}h old)"
+            flag = "  STALE: " + row["why"] if row["stale"] else ""
+            print(f"# {args.team}{age}{flag}", file=sys.stderr)
+            print(row["text"], end="")
+            return 0
+
+        if args.subcommand == "list":
+            names = writers(repo=repo)
+            if not names:
+                print("[attnroute] no board rows in this clone", file=sys.stderr)
+                return 1
+            for name in names:
+                row = read(name.replace(".md", ""), repo=repo)
+                mark = "STALE" if row["stale"] else "ok   "
+                age = "?" if row["age_hours"] is None else f"{row['age_hours']:.1f}h"
+                print(f"{mark}  {name:<12} {age:>8}  {len(row['text']):>6} chars")
+            return 0
+
+        if args.subcommand == "set":
+            if args.file in (None, "-"):
+                text = sys.stdin.read()
+            else:
+                text = Path(args.file).read_text(encoding="utf-8")
+            if not text.strip():
+                print("[attnroute] refusing to write an empty row", file=sys.stderr)
+                return 1
+            result = write(args.team, text, repo=repo, message=args.message)
+            where = "created the board branch" if result["created_branch"] else "updated"
+            print(f"[attnroute] {where}: {result['path']} at {result['commit'][:12]} "
+                  f"(attempt {result['attempts']})", file=sys.stderr)
+            return 0
+    except BoardError as exc:
+        print(f"[attnroute] board: {exc}", file=sys.stderr)
+        return 1
+    return 1
+
+
 def cmd_warmup(args):
     """Hard warmup: analyze project for instant context routing."""
     from attnroute.warmup import analyze_warmup, apply_warmup_to_state, build_warmup_state
@@ -594,6 +653,23 @@ For more information, visit: https://github.com/jeranaias/attnroute
                                 help="Plugin subcommand (default: list)")
     plugins_parser.add_argument("name", nargs="?", help="Plugin name (for enable/disable/status)")
 
+    # board command
+    board_parser = subparsers.add_parser(
+        "board", help="Read or publish a row on the shared team board")
+    board_parser.add_argument("subcommand", nargs="?", default="list",
+                              choices=["get", "set", "list"],
+                              help="Board subcommand (default: list)")
+    board_parser.add_argument("--team", type=str, default=None,
+                              help="Writer name, e.g. T4, or _lead")
+    board_parser.add_argument("--file", type=str, default=None,
+                              help="File to publish, or - for stdin (set only)")
+    board_parser.add_argument("--message", type=str, default=None,
+                              help="Commit message for the write")
+    board_parser.add_argument("--repo", type=str, default=None,
+                              help="Repository holding the board (default: cwd)")
+    board_parser.add_argument("--json", action="store_true",
+                              help="Print the row with its age and staleness as JSON")
+
     # ingest command
     ingest_parser = subparsers.add_parser("ingest", help="Bootstrap learner from Claude Code history")
     ingest_parser.add_argument("--project", type=str, default=None,
@@ -640,6 +716,7 @@ For more information, visit: https://github.com/jeranaias/attnroute
         "version": cmd_version,
         "diagnostic": cmd_diagnostic,
         "plugins": cmd_plugins,
+        "board": cmd_board,
         "ingest": cmd_ingest,
         "validate": cmd_validate,
         "warmup": cmd_warmup,
