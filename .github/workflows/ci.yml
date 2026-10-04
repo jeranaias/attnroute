@@ -55,7 +55,25 @@ jobs:
           fi
 
       - name: Run tests
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short -m "not realgit"
+
+      # The board tests drive REAL git in real repositories: two clones of one bare remote,
+      # standing in for the two machines the teams sit on. They are the only honest check of
+      # the property that matters -- two writers racing -- and they cost ~83 s, so they do
+      # not run on all fourteen jobs.
+      #
+      # THE TWO JOBS ARE CHOSEN, NOT ARBITRARY:
+      #   * Linux on the OLDEST supported Python, because the one failure these tests have
+      #     ever had was version-specific -- `datetime.fromisoformat` on 3.10 only, with
+      #     3.11, 3.12, 3.13 and 3.14 all green. Running them on 3.12 would have "fixed"
+      #     that by not looking.
+      #   * Windows, because paths, `os.replace` and git's handling of both differ there,
+      #     and a Windows path is what broke the read ledger's key separator.
+      - name: Run the real-git board tests
+        if: >-
+          (matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10') ||
+          (matrix.os == 'windows-latest' && matrix.python-version == '3.12')
+        run: pytest tests/ -v --tb=short -m realgit
 
   lint:
     runs-on: ubuntu-latest

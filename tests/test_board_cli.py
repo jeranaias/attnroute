@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.realgit      # see tests/test_board.py for why
+
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "Board Test", "GIT_AUTHOR_EMAIL": "board@test",
     "GIT_COMMITTER_NAME": "Board Test", "GIT_COMMITTER_EMAIL": "board@test",
@@ -68,8 +70,8 @@ def test_the_json_form_carries_the_age_and_the_staleness(clone):
     got = run(clone, "get", "--team", "T4", "--json")
     assert got.returncode == 0, got.stderr
     row = json.loads(got.stdout)
-    assert row["stale"] is False
-    assert row["age_hours"] is not None
+    assert row["stale"] is False, row
+    assert row["age_hours"] is not None, row
     assert row["source"] == "origin/board:teams/T4.md"
 
 

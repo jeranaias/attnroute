@@ -20,6 +20,13 @@ import pytest
 
 from attnroute import board
 
+#: These drive REAL git in real repositories, which is the point of them and also ~83 s of
+#: wall clock. CI runs them on one Linux job and one Windows job -- Windows because paths
+#: and `os.replace` behave differently there -- and skips them elsewhere. They are never
+#: mocked: every property worth having here is about two writers racing, and a mocked git
+#: cannot show you that.
+pytestmark = pytest.mark.realgit
+
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "Board Test", "GIT_AUTHOR_EMAIL": "board@test",
     "GIT_COMMITTER_NAME": "Board Test", "GIT_COMMITTER_EMAIL": "board@test",
@@ -134,8 +141,10 @@ class TestReadingNeedsNoNetwork:
         a, _ = clones
         board.write("T4", "row\n", repo=a)
         row = board.read("T4", repo=a)
-        assert row["written_at"]
-        assert row["age_hours"] is not None and row["age_hours"] < 1
+        # The whole row goes in the message: when this failed on one CI job only, the
+        # reason was in `why` and the log did not show it.
+        assert row["written_at"], row
+        assert row["age_hours"] is not None and row["age_hours"] < 1, row
 
     def test_an_old_row_is_reported_stale_rather_than_dropped(self, clones, monkeypatch):
         """A row that is quietly dropped is indistinguishable from a team that never
@@ -148,9 +157,9 @@ class TestReadingNeedsNoNetwork:
 
         row = board.read("T4", repo=a)
 
-        assert row["stale"] is True
+        assert row["stale"] is True, row
         assert "ancient" in row["text"], "the text must still be served"
-        assert "older than" in row["why"]
+        assert "older than" in row["why"], row
 
 
 class TestOneWriterPerFileMeansNoConflicts:

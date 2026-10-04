@@ -104,18 +104,30 @@ def read(team: str, repo: Path | str = ".", ref: str = READ_REF) -> dict:
                           f"`git fetch origin {BRANCH}:refs/remotes/{ref}` once")
         return out
 
-    stamp = _git(["log", "-1", "--format=%cI", ref, "--", path], repo).strip()
-    if stamp:
-        try:
-            written = datetime.fromisoformat(stamp)
-            out["written_at"] = written.isoformat()
-            age = (datetime.now(timezone.utc) - written).total_seconds() / 3600.0
-            out["age_hours"] = round(age, 2)
-            out["stale"] = age > STALE_AFTER_HOURS
-            if out["stale"]:
-                out["why"] = f"written {age:.0f}h ago, older than {STALE_AFTER_HOURS:.0f}h"
-        except ValueError:
-            out["why"] = f"unreadable commit time {stamp!r}"
+    # WARNING: ASK GIT FOR EPOCH SECONDS, NOT AN ISO STRING.
+    #   This was `--format=%cI` parsed with `datetime.fromisoformat`, and it failed on
+    #   ubuntu/Python 3.10 ONLY -- 3.11, 3.12, 3.13 and 3.14 all passed, as did macOS 3.10.
+    #   Before 3.11, `fromisoformat` accepts only the exact subset that `isoformat()`
+    #   emits, so the answer depended on the Python version AND on what that runner's git
+    #   chose to print. `%ct` is an integer count of seconds: nothing to parse, no
+    #   timezone subset, same answer on every version and platform.
+    stamp = _git(["log", "-1", "--format=%ct", ref, "--", path], repo).strip()
+    if not stamp:
+        out["why"] = out["why"] or f"no commit found for {path} on {ref}"
+        return out
+    try:
+        written = datetime.fromtimestamp(int(stamp), tz=timezone.utc)
+    except (ValueError, OverflowError, OSError) as exc:
+        # Reported with the value, because a row whose age is silently unknown looks
+        # exactly like a row that is fresh.
+        out["why"] = f"unreadable commit time {stamp!r}: {exc!r}"
+        return out
+    out["written_at"] = written.isoformat()
+    age = (datetime.now(timezone.utc) - written).total_seconds() / 3600.0
+    out["age_hours"] = round(age, 2)
+    out["stale"] = age > STALE_AFTER_HOURS
+    if out["stale"]:
+        out["why"] = f"written {age:.0f}h ago, older than {STALE_AFTER_HOURS:.0f}h"
     return out
 
 
