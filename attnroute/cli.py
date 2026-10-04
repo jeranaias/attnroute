@@ -667,6 +667,24 @@ def cmd_train(args):
         return 1
 
 
+def _utf8_console() -> None:
+    """WARNING: A PRINTED CHARACTER MUST NOT BE ABLE TO KILL A COMMAND.
+
+    `attnroute state handback` died with "'charmap' codec can't encode character '\\u26a0'"
+    on a Windows console, whose default code page is cp1252. The generated text no longer
+    contains that character, but a NOTE's words come from the operator -- the next one could
+    carry an em dash or an accent and take the command down the same way.
+
+    errors="replace" rather than "strict": a mark the console cannot draw is a cosmetic
+    problem, and losing the whole output is not.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass            # an older stream object, or one that is not a real console
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -831,6 +849,7 @@ For more information, visit: https://github.com/jeranaias/attnroute
     train_parser.add_argument("--data-dir", type=str, default=None,
                               help="Directory with external training data (for v2)")
 
+    _utf8_console()
     args = parser.parse_args()
 
     if args.command is None:

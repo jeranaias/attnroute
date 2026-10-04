@@ -385,7 +385,7 @@ def handback(state: dict, board_rows: dict | None = None, repo: Path | str = "."
     #   not fit" line was appended unchecked. The one line whose whole job is to report the
     #   budget was the line that broke it.
     reserve = estimate_tokens(
-        f"- 9999 further item(s) did not fit the {budget}-token handback budget and "
+        f"- (!) 9999 further item(s) did not fit the {budget}-token handback budget and "
         f"were NOT carried over. `attnroute state show` lists them all.") + 4
     content_budget = max(0, budget - reserve)
 
@@ -439,8 +439,8 @@ def handback(state: dict, board_rows: dict | None = None, repo: Path | str = "."
         derived.append("- DERIVED commits/pushes: "
                        + "; ".join(facts["commands"][-4:]))
     if facts.get("view_complete") is False:
-        derived.append("- DERIVED ⚠ the transcript view was INCOMPLETE, so the facts above "
-                       "may be missing earlier work in this window")
+        derived.append("- DERIVED (!) the transcript view was INCOMPLETE, so the facts "
+                       "above may be missing earlier work in this window")
     for line in derived:
         if fits(line):
             text += "\n" + line
@@ -448,7 +448,7 @@ def handback(state: dict, board_rows: dict | None = None, repo: Path | str = "."
             dropped += 1
 
     if dropped:
-        text += (f"\n- ⚠ {dropped} further item(s) did not fit the "
+        text += (f"\n- (!) {dropped} further item(s) did not fit the "
                  f"{budget}-token handback budget and were NOT carried over. "
                  f"`attnroute state show` lists them all.")
 

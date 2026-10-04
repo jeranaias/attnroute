@@ -10,6 +10,7 @@ tell it is wrong.
 """
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -70,10 +71,29 @@ class TestMatchingIsOnComponentsNotCharacters:
         assert tm.team_for(f"{root}/meridian-t5/nav", env={}, map_file=p)["team"] == "T5"
         assert tm.team_for(f"{root}/other", env={}, map_file=p)["team"] == "shared"
 
-    def test_case_and_separators_do_not_matter(self, mapping, root):
+    @pytest.mark.skipif(os.name != "nt", reason="case folding and backslash separators are "
+                                                "Windows semantics; on POSIX two spellings "
+                                                "are two directories")
+    def test_case_and_separators_do_not_matter_on_windows(self, mapping, root):
+        """⚠ THIS TEST WAS ASSERTING SOMETHING UNTRUE ON THE PLATFORM IT FAILED ON.
+
+        It ran everywhere and failed on macOS, and the reason was not the test: `_normalise`
+        lower-cased every component on every platform. On POSIX `/work/Meridian-T5` and
+        `/work/meridian-t5` are two different directories, so folding them is the exact harm
+        this module exists to prevent. See the POSIX counterpart below.
+        """
         p = mapping({f"{root}/meridian-t5": "T5"})
         back = (root + "/meridian-T5/nav").replace("/", BS)
         assert tm.team_for(back, env={}, map_file=p)["team"] == "T5"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX paths are case-sensitive; Windows "
+                                                "paths are not")
+    def test_case_DOES_matter_on_posix(self, mapping, root):
+        """The counterpart, and the reason the one above is not simply deleted: on POSIX a
+        different case is a different directory, and must not be another team's."""
+        p = mapping({f"{root}/meridian-t5": "T5"})
+        assert tm.team_for(f"{root}/meridian-T5/nav", env={}, map_file=p)["team"] is None
+        assert tm.team_for(f"{root}/meridian-t5/nav", env={}, map_file=p)["team"] == "T5"
 
     def test_a_trailing_slash_in_the_mapping_does_not_matter(self, mapping, root):
         p = mapping({f"{root}/meridian-t5/": "T5"})

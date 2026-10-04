@@ -11,6 +11,9 @@ So the cwd decides, via `~/.claude/attnroute-teams.json`:
      "C:/Users/Jesse/meridian-t6": "T6",
      "D:/projects/meridian": "architect"}
 
+Write those paths with FORWARD slashes, on every platform. Case is folded on Windows, where
+the filesystem folds it, and NOT on POSIX, where two spellings are two directories.
+
 The environment variable still wins when it is set, because a session that has been told who
 it is should not be second-guessed by a path.
 
@@ -63,15 +66,29 @@ def map_path() -> Path:
 
 
 def _normalise(path) -> tuple:
-    """A path as a tuple of lowercased components, so comparison is per directory.
+    """A path as a tuple of comparable components, so comparison is per directory.
 
-    Lowercased because the shared machine is Windows, where `C:/Users` and `c:/users` are
-    the same directory and a case difference in a hand-written mapping file is not a
-    different team.
+    WARNING: CASE IS FOLDED ONLY WHERE THE FILESYSTEM FOLDS IT, AND I HAD THIS WRONG.
+      This lower-cased every component unconditionally. On Windows that is correct --
+      `C:/Users` and `c:/users` are one directory, and a case difference in a hand-written
+      mapping file is not a different team. On POSIX it is WRONG: `/work/Meridian-T5` and
+      `/work/meridian-t5` are two different directories, and folding them together is
+      exactly the harm this module exists to prevent, one team's sessions filed under
+      another's name.
+
+      `os.path.normcase` is the standard library's answer to this question: lower-case and
+      translate separators on Windows, identity on POSIX. The backslash translation is the
+      same question -- a separator on Windows, an ordinary filename character on POSIX.
+
+      Consequence for the mapping file: write its paths with FORWARD slashes. A Windows
+      path spelled with backslashes is understood on Windows and, read on a POSIX machine,
+      is one long filename rather than a path.
     """
-    text = str(path or "").replace("\\", "/").rstrip("/")
-    parts = [p for p in text.split("/") if p not in ("", ".")]
-    return tuple(p.lower() for p in parts)
+    text = str(path or "")
+    if os.name == "nt":
+        text = text.replace("\\", "/")
+    parts = [p for p in text.rstrip("/").split("/") if p not in ("", ".")]
+    return tuple(os.path.normcase(p) for p in parts)
 
 
 def _resolve(path) -> tuple:
