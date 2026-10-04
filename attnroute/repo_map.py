@@ -31,12 +31,40 @@ try:
 except ImportError:
     TREE_SITTER_AVAILABLE = False
 
-# Try to import networkx for PageRank
-try:
-    import networkx as nx
-    NETWORKX_AVAILABLE = True
-except ImportError:
-    NETWORKX_AVAILABLE = False
+# ═══ networkx IS IMPORTED ON USE, NOT ON IMPORT ════════════════════════════════════════
+#
+# WARNING: `import networkx` COSTS 790 ms, and this module is on the UserPromptSubmit hook
+#   path through context_router -- so every prompt paid for it. It is used in exactly two
+#   places: one DiGraph() and one pagerank() call.
+#
+#   Availability is decided with `find_spec`, which looks the module up WITHOUT executing
+#   it, so NETWORKX_AVAILABLE keeps meaning exactly what it meant before (the name was
+#   importable) at none of the cost. A path that only asks "is PageRank available?" now
+#   does no work at all.
+def _spec(name: str) -> bool:
+    """Is `name` importable? Answered WITHOUT executing it."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError, AttributeError):
+        return False
+
+
+NETWORKX_AVAILABLE = _spec("networkx")
+
+nx = None
+
+
+def _nx():
+    """networkx, imported on first use. None when it is not installed."""
+    global nx
+    if nx is None and NETWORKX_AVAILABLE:
+        try:
+            import networkx as _module
+            nx = _module
+        except ImportError:                 # installed but broken: same as absent
+            return None
+    return nx
 
 # Try to import telemetry_lib for accurate token counting
 try:
@@ -129,7 +157,7 @@ class RepoMapper:
         self.repo_path = Path(repo_path)
         self.max_files = max_files
         self.file_symbols: dict[str, FileSymbols] = {}
-        self.dependency_graph = nx.DiGraph() if NETWORKX_AVAILABLE else None
+        self.dependency_graph = _nx().DiGraph() if NETWORKX_AVAILABLE else None
         self._indexed = False
 
     def index(self, verbose: bool = False) -> None:
@@ -420,7 +448,7 @@ class RepoMapper:
             return {f: 1.0 for f in self.file_symbols}
 
         try:
-            scores = nx.pagerank(self.dependency_graph, alpha=PAGERANK_ALPHA)
+            scores = _nx().pagerank(self.dependency_graph, alpha=PAGERANK_ALPHA)
             return scores
         except Exception:
             return {f: 1.0 for f in self.file_symbols}
