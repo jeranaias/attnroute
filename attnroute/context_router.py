@@ -457,14 +457,28 @@ def _evict_lowest_source(state: dict, new_path: str, new_score: float) -> None:
 # Load keywords and co-activation from external config if available
 # ============================================================================
 
-def load_keyword_config() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
+def load_keyword_config() -> tuple[dict[str, list[str]], dict[str, list[str]], list[str], Path | None]:
     """
     Load keywords, co-activation graph, and pinned files from keywords.json.
     Falls back to hardcoded defaults if config doesn't exist or fails to parse.
 
-    Returns: (keywords_dict, co_activation_dict, pinned_list)
+    Returns: (keywords_dict, co_activation_dict, pinned_list, corpus_root)
+
+    `corpus_root` is the directory the config came from. The doc paths in
+    `keywords` are relative to IT and to nothing else.
     """
-    # Try project-local config first, then global
+    # ⚠⚠ THE CORPUS IS DEFINED IN ONE PLACE AND THE DOCS LIVE IN ANOTHER, AND THEY USED TO BE
+    #   RESOLVED INDEPENDENTLY. `load_keyword_config` walked [project, global] at IMPORT time
+    #   while `resolve_docs_root` walked [env, project, global] inside main() -- two chains,
+    #   two fallbacks, no guarantee of agreeing.
+    #
+    #   MEASURED CONSEQUENCE (issue #10, a real session): the global config named
+    #   `systems/network.md` and 0 of its 23 files existed under the resolved docs root. That
+    #   reads as "the user deleted them" and is more likely a DISAGREEMENT between the two
+    #   resolutions -- a corpus named from one root and looked for under another.
+    #
+    #   So the config now returns the ROOT IT CAME FROM, main() uses that root, and the two
+    #   cannot diverge. One fact, one owner.
     config_paths = [
         Path(".claude/keywords.json"),
         Path.home() / ".claude" / "keywords.json"
@@ -477,11 +491,30 @@ def load_keyword_config() -> tuple[dict[str, list[str]], dict[str, list[str]], l
                 keywords = config.get("keywords", {})
                 co_activation = config.get("co_activation", {})
                 pinned = config.get("pinned", [])
+                declared = config.get("projects")
+
+                # ⚠ A GLOBAL CORPUS APPLIES ONLY WHERE IT SAYS IT APPLIES, WHEN IT SAYS SO.
+                #   `projects` is an opt-in TIGHTENING: a config that declares it is refused
+                #   outside those projects, which is how a home-lab corpus is prevented from
+                #   reaching an unrelated repository. A config that declares nothing behaves as
+                #   before, so this does not break an existing single-project setup.
+                if declared is not None:
+                    here = str(Path.cwd()).lower().replace("\\", "/")
+                    if not any(str(d).lower().replace("\\", "/") in here
+                               for d in declared if d):
+                        print(f"[attnroute] {config_path} declares projects {declared} and this "
+                              f"is not one of them -- NOT applying it here",
+                              file=sys.stderr)
+                        continue
 
                 # Validate structure
                 if keywords and isinstance(keywords, dict):
                     print(f"[attnroute] Loaded keywords from {config_path}", file=sys.stderr)
-                    return keywords, co_activation, pinned
+                    # ⚠ ABSOLUTE. A relative root is re-resolved against the CWD at USE
+                    #   time, and the config is loaded at import while main() uses the
+                    #   root later -- so a relative root is a second resolution wearing
+                    #   a different hat. Caught by a test that compared the two.
+                    return keywords, co_activation, pinned, config_path.parent.resolve()
             except (json.JSONDecodeError, Exception) as e:
                 print(f"[attnroute] WARN:Failed to load {config_path}: {e}", file=sys.stderr)
                 continue
@@ -493,13 +526,16 @@ def load_keyword_config() -> tuple[dict[str, list[str]], dict[str, list[str]], l
             auto_kw = auto_extract_keywords(docs_root)
             if auto_kw:
                 pass  # Auto-extracted keywords silently
-                return auto_kw, {}, []
+                return auto_kw, {}, [], docs_root
         except Exception:
             pass
 
     print("[attnroute] WARN: No keywords.json found — attnroute has no routing rules.", file=sys.stderr)
     print("  Run 'attnroute init' to generate a keywords.json template.", file=sys.stderr)
-    return _DEFAULT_KEYWORDS, _DEFAULT_CO_ACTIVATION, []
+    # ⚠ NO CONFIG AND NO AUTO-EXTRACTION: the hardcoded defaults, and NO ROOT. A None root
+    #   means "nothing is anchored anywhere", which main() must treat as nothing to route
+    #   rather than as a licence to look wherever it likes.
+    return _DEFAULT_KEYWORDS, _DEFAULT_CO_ACTIVATION, [], None
 
 # ============================================================================
 # KEYWORD MAPPINGS
@@ -521,7 +557,50 @@ _DEFAULT_KEYWORDS: dict[str, list[str]] = {}
 _DEFAULT_CO_ACTIVATION: dict[str, list[str]] = {}
 
 # Load actual configuration (from keywords.json or fallback to defaults)
-KEYWORDS, CO_ACTIVATION, _LOADED_PINNED = load_keyword_config()
+KEYWORDS, CO_ACTIVATION, _LOADED_PINNED, CORPUS_ROOT = load_keyword_config()
+
+
+def _drop_absent_docs(keywords: dict, pinned: list, root) -> tuple[dict, list, list]:
+    """Keep only documents that EXIST under `root`. -> (keywords, pinned, dropped)
+
+    ⚠⚠ A DOCUMENT THAT IS NOT THERE CANNOT BE ROUTED, AND SCORING ONE IS NOT HARMLESS.
+      Issue #10 reported `systems/network.md` injected 1,699 times -- 99.6% of all injection
+      volume -- while 0 of that corpus's 23 files existed under the resolved root. It was the
+      PINNED file, and pinning sets an unconditional score floor (Phase 4), so it won a HOT or
+      WARM slot on every single prompt whether or not there was anything to read.
+
+      Dropping absent documents is therefore the structural guarantee that one project's
+      corpus cannot inject into another's session: the paths simply are not under this root.
+      It is also what stops a pin firing on a phantom.
+
+      DROPS ARE REPORTED, NEVER SILENT. A corpus that has quietly become phantom is exactly
+      the state #10 spent months in, and the count is the one line that would have shown it.
+    """
+    if root is None:
+        return keywords, pinned, []
+    kept, dropped = {}, []
+    for doc, kws in (keywords or {}).items():
+        try:
+            if (Path(root) / doc).is_file():
+                kept[doc] = kws
+            else:
+                dropped.append(doc)
+        except OSError:
+            dropped.append(doc)
+    kept_pinned = [d for d in (pinned or []) if d in kept]
+    return kept, kept_pinned, dropped
+
+
+KEYWORDS, _LOADED_PINNED, _ABSENT_DOCS = _drop_absent_docs(KEYWORDS, _LOADED_PINNED, CORPUS_ROOT)
+if _ABSENT_DOCS:
+    print(f"[attnroute] {len(_ABSENT_DOCS)} of "
+          f"{len(KEYWORDS) + len(_ABSENT_DOCS)} corpus documents do not exist under "
+          f"{CORPUS_ROOT} and were dropped: {', '.join(sorted(_ABSENT_DOCS)[:5])}"
+          f"{' ...' if len(_ABSENT_DOCS) > 5 else ''}", file=sys.stderr)
+    if not KEYWORDS:
+        print("[attnroute] the corpus is EMPTY after dropping absent documents -- nothing will "
+              "be routed. This is reported rather than silent: a phantom corpus looks exactly "
+              "like a quiet one.", file=sys.stderr)
 
 # Override hardcoded PINNED_FILES with config-loaded ones if available
 if _LOADED_PINNED:
@@ -1997,7 +2076,12 @@ def main():
     # Priority 1: Explicit CONTEXT_DOCS_ROOT environment variable
     # Priority 2: Project-local .claude/ (if exists with .md files)
     # Priority 3: Global ~/.claude/
-    docs_root = resolve_docs_root()
+    #
+    # ⚠ ONE RESOLUTION. `CORPUS_ROOT` is the directory the keyword config came from, so the
+    #   documents named in it are looked for where they were named. `resolve_docs_root()` is
+    #   the fallback for the NO-CONFIG case only -- two independent chains is what let a
+    #   corpus be named from one root and searched under another (#10: "0 of 23 files exist").
+    docs_root = CORPUS_ROOT if CORPUS_ROOT is not None else resolve_docs_root()
 
     # Load state
     state_file = get_state_file()
