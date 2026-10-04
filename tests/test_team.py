@@ -31,45 +31,85 @@ class TestTheEnvironmentStillWins:
     """A session that has been told who it is is not second-guessed by a path."""
 
     def test_the_variable_beats_the_mapping(self, mapping):
-        p = mapping({"C:/x": "T1"})
-        found = tm.team_for("C:/x/y", env={tm.TEAM_ENV: "T7"}, map_file=p)
+        p = mapping({"/work/x": "T1"})
+        found = tm.team_for("/work/x/y", env={tm.TEAM_ENV: "T7"}, map_file=p)
         assert found == {"team": "T7", "source": "env", "why": ""}
 
     def test_a_blank_variable_does_not_win(self, mapping):
-        p = mapping({"C:/x": "T1"})
-        assert tm.team_for("C:/x/y", env={tm.TEAM_ENV: "  "}, map_file=p)["team"] == "T1"
+        p = mapping({"/work/x": "T1"})
+        assert tm.team_for("/work/x/y", env={tm.TEAM_ENV: "  "}, map_file=p)["team"] == "T1"
 
 
+#: Every matching case runs in both styles. The first version of this file used only
+#: Windows paths, which are RELATIVE on POSIX -- so CI went red on Linux and macOS while
+#: passing here, and the resolver bug it was hiding (relocating a relative path to the hook
+#: process's own directory) stayed invisible on the machine it was written on.
+STYLES = {
+    "windows": "C:/Users/Jesse",
+    "posix": "/home/jesse",
+}
+
+
+@pytest.mark.parametrize("root", list(STYLES.values()), ids=list(STYLES))
 class TestMatchingIsOnComponentsNotCharacters:
     """⚠ A plain `startswith` files T50's work under T5."""
 
-    def test_a_longer_sibling_is_not_a_match(self, mapping):
-        p = mapping({"C:/repo/meridian-t5": "T5", "C:/repo/meridian-t50": "T50"})
-        assert tm.team_for("C:/repo/meridian-t5/nav", env={}, map_file=p)["team"] == "T5"
-        assert tm.team_for("C:/repo/meridian-t50", env={}, map_file=p)["team"] == "T50"
+    def test_a_longer_sibling_is_not_a_match(self, mapping, root):
+        p = mapping({f"{root}/meridian-t5": "T5", f"{root}/meridian-t50": "T50"})
+        assert tm.team_for(f"{root}/meridian-t5/nav", env={}, map_file=p)["team"] == "T5"
+        assert tm.team_for(f"{root}/meridian-t50", env={}, map_file=p)["team"] == "T50"
 
-    def test_a_partial_component_is_not_a_match(self, mapping):
-        p = mapping({"C:/repo/meridian-t5": "T5"})
-        found = tm.team_for("C:/repo/meridian-t5-old", env={}, map_file=p)
+    def test_a_partial_component_is_not_a_match(self, mapping, root):
+        p = mapping({f"{root}/meridian-t5": "T5"})
+        found = tm.team_for(f"{root}/meridian-t5-old", env={}, map_file=p)
         assert found["team"] is None, "matched across a directory boundary"
 
-    def test_the_longest_prefix_wins(self, mapping):
-        p = mapping({"C:/Users/Jesse": "shared", "C:/Users/Jesse/meridian-t5": "T5"})
-        assert tm.team_for("C:/Users/Jesse/meridian-t5/nav", env={}, map_file=p)["team"] == "T5"
-        assert tm.team_for("C:/Users/Jesse/other", env={}, map_file=p)["team"] == "shared"
+    def test_the_longest_prefix_wins(self, mapping, root):
+        p = mapping({root: "shared", f"{root}/meridian-t5": "T5"})
+        assert tm.team_for(f"{root}/meridian-t5/nav", env={}, map_file=p)["team"] == "T5"
+        assert tm.team_for(f"{root}/other", env={}, map_file=p)["team"] == "shared"
 
-    def test_case_and_separators_do_not_matter(self, mapping):
-        p = mapping({"C:/Users/Jesse/meridian-t5": "T5"})
-        windows_style = BS.join(["C:", "Users", "Jesse", "MERIDIAN-T5", "nav"])
-        assert tm.team_for(windows_style, env={}, map_file=p)["team"] == "T5"
+    def test_case_and_separators_do_not_matter(self, mapping, root):
+        p = mapping({f"{root}/meridian-t5": "T5"})
+        back = (root + "/meridian-T5/nav").replace("/", BS)
+        assert tm.team_for(back, env={}, map_file=p)["team"] == "T5"
 
-    def test_a_trailing_slash_in_the_mapping_does_not_matter(self, mapping):
-        p = mapping({"C:/Users/Jesse/meridian-t5/": "T5"})
-        assert tm.team_for("C:/Users/Jesse/meridian-t5", env={}, map_file=p)["team"] == "T5"
+    def test_a_trailing_slash_in_the_mapping_does_not_matter(self, mapping, root):
+        p = mapping({f"{root}/meridian-t5/": "T5"})
+        assert tm.team_for(f"{root}/meridian-t5", env={}, map_file=p)["team"] == "T5"
 
-    def test_the_source_says_where_the_answer_came_from(self, mapping):
-        p = mapping({"C:/x": "T1"})
-        assert tm.team_for("C:/x/y", env={}, map_file=p)["source"] == "map"
+    def test_the_source_says_where_the_answer_came_from(self, mapping, root):
+        p = mapping({root: "T1"})
+        assert tm.team_for(f"{root}/y", env={}, map_file=p)["source"] == "map"
+
+
+class TestTheResolverDoesNotRelocateAPath:
+    """⚠ THE BUG THAT TURNED CI RED, and it was production code, not the tests.
+
+    `Path(path).resolve()` on a RELATIVE path joins it to the current directory of whatever
+    process is asking. A hook process does not necessarily run in the session's directory,
+    so relocating a path to the hook's own cwd answers a different question -- and the
+    answer is a team attributed from the wrong directory.
+    """
+
+    def test_a_relative_path_keeps_its_own_components(self):
+        assert tm._resolve("some/rel/path") == ("some", "rel", "path")
+
+    def test_a_relative_path_does_not_acquire_the_process_directory(self):
+        from pathlib import Path as _P
+
+        here = tm._normalise(_P.cwd())
+        got = tm._resolve("worktree/t5")
+        assert got[:len(here)] != here, f"the process cwd leaked into {got}"
+
+    @pytest.mark.parametrize("absolute", ["C:/Users/Jesse/x", "/home/jesse/x"])
+    def test_an_absolute_path_in_either_style_keeps_its_components(self, absolute):
+        got = tm._resolve(absolute)
+        assert got[-2:] == tm._normalise(absolute)[-2:], got
+
+    def test_a_path_that_is_not_a_string_is_not_fatal(self):
+        assert tm._resolve(None) == ()
+        assert tm._resolve(12) == ("12",)
 
 
 class TestACollidingMappingIsRefusedNotGuessed:
@@ -78,49 +118,49 @@ class TestACollidingMappingIsRefusedNotGuessed:
     one team's sessions under another with nothing to show it."""
 
     def test_two_spellings_naming_two_teams_is_reported(self, mapping):
-        p = mapping({"C:/a": "T1", "C:" + BS + "A": "T2"})
-        found = tm.team_for("C:/a/b", env={}, map_file=p)
+        p = mapping({"/work/a": "T1", "/work" + BS + "A": "T2"})
+        found = tm.team_for("/work/a/b", env={}, map_file=p)
         assert found["team"] is None, "a colliding mapping must not resolve to either team"
         assert "ambiguous" in found["why"]
         assert "T1" in found["why"] and "T2" in found["why"]
 
     def test_two_spellings_naming_the_SAME_team_is_fine(self, mapping):
         """Positive control: the check must not refuse a merely redundant mapping."""
-        p = mapping({"C:/a": "T1", "C:/A/": "T1"})
-        assert tm.team_for("C:/a/b", env={}, map_file=p)["team"] == "T1"
+        p = mapping({"/work/a": "T1", "/work/A/": "T1"})
+        assert tm.team_for("/work/a/b", env={}, map_file=p)["team"] == "T1"
 
     def test_a_collision_elsewhere_still_refuses_the_whole_file(self, mapping):
         """Deliberate: a file with a contradiction in it is not trustworthy in its other
         rows either, and a half-used mapping is harder to reason about than a refused one."""
-        p = mapping({"C:/a": "T1", "C:/A": "T2", "C:/b": "T3"})
-        assert tm.team_for("C:/b", env={}, map_file=p)["team"] is None
+        p = mapping({"/work/a": "T1", "/work/A": "T2", "/work/b": "T3"})
+        assert tm.team_for("/work/b", env={}, map_file=p)["team"] is None
 
 
 class TestAMissingOrBrokenMappingSaysSo:
 
     def test_an_absent_file_names_the_variable_to_set(self, tmp_path):
-        found = tm.team_for("C:/x", env={}, map_file=tmp_path / "nope.json")
+        found = tm.team_for("/work/x", env={}, map_file=tmp_path / "nope.json")
         assert found["team"] is None
         assert tm.TEAM_ENV in found["why"]
 
     def test_unparseable_json_is_reported_with_the_path(self, tmp_path):
         p = tmp_path / "attnroute-teams.json"
         p.write_text("{not json", encoding="utf-8")
-        found = tm.team_for("C:/x", env={}, map_file=p)
+        found = tm.team_for("/work/x", env={}, map_file=p)
         assert "could not be read" in found["why"]
         assert "attnroute-teams.json" in found["why"]
 
     def test_a_json_list_is_reported_rather_than_ignored(self, mapping):
         p = mapping(["T1", "T2"])
-        assert "not an object" in tm.team_for("C:/x", env={}, map_file=p)["why"]
+        assert "not an object" in tm.team_for("/work/x", env={}, map_file=p)["why"]
 
     def test_rows_that_are_not_strings_are_skipped_without_failing(self, mapping):
-        p = mapping({"C:/x": "T1", "C:/y": 5, "C:/z": "", "7": "T2"})
-        assert tm.team_for("C:/x/a", env={}, map_file=p)["team"] == "T1"
+        p = mapping({"/work/x": "T1", "/work/y": 5, "/work/z": "", "7": "T2"})
+        assert tm.team_for("/work/x/a", env={}, map_file=p)["team"] == "T1"
 
     def test_an_unmatched_path_says_what_it_tried(self, mapping):
-        p = mapping({"C:/x": "T1"})
-        found = tm.team_for("D:/elsewhere", env={}, map_file=p)
+        p = mapping({"/work/x": "T1"})
+        found = tm.team_for("/elsewhere", env={}, map_file=p)
         assert found["team"] is None
         assert "no attnroute-teams.json prefix matches" in found["why"]
 
@@ -128,7 +168,7 @@ class TestAMissingOrBrokenMappingSaysSo:
         monkeypatch.setattr(tm, "team_for",
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
         tm._CACHE.clear()
-        found = tm.current("C:/x")
+        found = tm.current("/work/x")
         assert found["team"] is None and "boom" in found["why"]
         tm._CACHE.clear()
 

@@ -202,7 +202,16 @@ def check_promotion(note: dict, repo: Path | str = ".") -> dict:
     """
     target = note.get("promoted_to")
     if not target:
-        return {"state": "UNPROMOTED", "why": "exists only in a context window"}
+        # WARNING: THIS WORDING CAUSED A TEAM TO DO THE EXACT OPPOSITE OF THE DESIGN.
+        #   It used to read "exists only in a context window". T7 read that as "this note
+        #   will not survive compaction", concluded bare notes were worthless, and
+        #   re-recorded everything by hand -- which is precisely the work the handback
+        #   exists to remove. An UNPROMOTED note is the SAFE case: it is in the state file
+        #   and it is handed back EVERY window until it is written down somewhere. The
+        #   message now says what is true of the note, not what is absent from the repo.
+        return {"state": "UNPROMOTED",
+                "why": ("kept in the state file and handed back every window; not yet "
+                        "written into a repo file")}
     path = Path(repo) / target
     try:
         if not path.is_file():

@@ -105,11 +105,27 @@ def _normalise(path) -> tuple:
 
 
 def _resolve(path) -> tuple:
-    """The cwd, resolved where possible. A path that does not exist is still usable."""
+    """The cwd as comparable components. A path that does not exist is still usable.
+
+    WARNING: ONLY AN ABSOLUTE PATH IS RESOLVED, AND THAT IS NOT A TEST CONCESSION.
+      `Path(path).resolve()` on a RELATIVE path joins it to the current directory of
+      whatever process is asking -- and a hook process does not necessarily run in the
+      session's directory. Relocating a path to the hook's own cwd is not "making it
+      absolute"; it is answering a different question, and the answer would be a team
+      attributed from the wrong directory.
+
+      It showed up first as CI failing on Linux and macOS, because "C:/x/y" is not absolute
+      on POSIX, so every prefix match was being made against
+      /home/runner/work/attnroute/attnroute/C:/x/y. The test paths exposed it; the defect
+      was in the resolver.
+    """
     try:
-        return _normalise(Path(path).resolve())
-    except (OSError, ValueError, RuntimeError):
-        return _normalise(path)
+        candidate = Path(path)
+        if candidate.is_absolute():
+            return _normalise(candidate.resolve())
+    except (OSError, ValueError, RuntimeError, TypeError):
+        pass
+    return _normalise(path)
 
 
 def team_for(cwd=None, env=None, map_file=None) -> dict:
