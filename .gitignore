@@ -64,3 +64,13 @@ benchmarks/*_results.json
 
 # Windows artifacts
 nul
+
+# attnroute runtime state. It must never appear in a working tree: eight team worktrees
+# with a file turning up in `git status` is a file somebody commits. The hooks write to
+# ~/.claude/attn_state/<project>.json instead, and these patterns exist only to catch a
+# legacy file left behind by an older version.
+.claude/attn_state.json
+.claude/attn_state/
+.claude/settings.local.json
+*.attnroute.tmp
+
