@@ -586,12 +586,63 @@ def nudge_due(state: dict) -> dict:
     return {"due": True, "why": f"{edits} edit(s), {commits} commit(s), no note yet"}
 
 
+def _quote(path: str) -> str:
+    return f'"{path}"' if " " in path else path
+
+
+def note_command() -> dict:
+    """The exact command that records a note FROM THIS INSTALL. -> {"command", "why"}
+
+    WARNING: `attnroute` ON PATH IS NOT NECESSARILY THIS attnroute. On the shared machine
+    the PATH copy was an older install with no `note` subcommand at all, so a session that
+    followed the nudge got an error and concluded the feature did not exist. A hook knows
+    which interpreter is running it, so it can name the one that works.
+
+    Two candidates, in order, and the answer is CHECKED rather than assumed:
+
+      1. the console script for this interpreter -- `sysconfig`'s scripts directory, which
+         is the venv's Scripts/bin when running in a venv, and next to the interpreter is
+         tried as well for unusual layouts;
+      2. `"<python>" -m attnroute.cli`, which needs no console script and therefore always
+         works, including from a source checkout with PYTHONPATH set.
+
+    Naming a path that does not exist would be the same mistake in a new costume, so (1) is
+    used only when the file is really there.
+    """
+    import sys
+    import sysconfig
+
+    names = ("attnroute.exe", "attnroute") if os.name == "nt" else ("attnroute",)
+    roots = []
+    try:
+        roots.append(Path(sysconfig.get_path("scripts")))
+    except (KeyError, OSError):
+        pass
+    try:
+        roots.append(Path(sys.executable).parent)
+    except (TypeError, ValueError):
+        pass
+    for root in roots:
+        for name in names:
+            candidate = root / name
+            try:
+                if candidate.is_file():
+                    return {"command": _quote(str(candidate)), "why": "console script"}
+            except OSError:
+                continue
+    return {"command": f"{_quote(sys.executable)} -m attnroute.cli",
+            "why": "no console script for this interpreter; using the module form"}
+
+
+#: `{command}` is filled with `note_command()` so the advice names an executable that
+#: exists, not whatever PATH happens to resolve.
 NUDGE_TEXT = (
     "[attnroute] This window has {edits} edit(s) and no recorded ruling. Anything you have "
     "DECIDED -- a ruling, a trade-off, a figure you withdrew -- is lost at the next "
     "compaction unless it is written down. One line is enough:\n"
-    "  attnroute note add --kind ruling \"<the ruling>\" [--promoted-to <path>]\n"
-    "Nothing infers these from your prose, by design."
+    "  {command} note add --kind ruling \"<the ruling>\" [--promoted-to <path>]\n"
+    "Nothing infers these from your prose, by design. (That path is this session's own "
+    "install; `attnroute` on PATH may be a different one.)"
 )
 
 
@@ -675,7 +726,8 @@ def hook(payload: dict, repo: Path | str = ".") -> dict | None:
             _emit("nudge", payload, edits=edits, why=due["why"])
             out = {"hookSpecificOutput": {
                 "hookEventName": "Stop",
-                "additionalContext": NUDGE_TEXT.format(edits=edits)}}
+                "additionalContext": NUDGE_TEXT.format(
+                    edits=edits, command=note_command()["command"])}}
 
     save(key, state)
     return out

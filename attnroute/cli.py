@@ -114,6 +114,32 @@ def cmd_status(args):
         print(f"  {len(missing)} of {len(capabilities)} capabilities are not at full function: "
               f"{', '.join(missing)}")
 
+    # ── WHICH attnroute WOULD A BARE COMMAND REACH? ────────────────────────────────────
+    #
+    # On the shared machine, `attnroute` on PATH was an older install with no `note`
+    # subcommand, so a session that followed the Stop-hook nudge got an error and concluded
+    # the feature did not exist. The nudge now names an absolute path, and this says out
+    # loud when the two differ -- which is the thing nobody would otherwise think to check.
+    print("Executables:")
+    try:
+        import shutil
+
+        from attnroute.session_state import note_command
+
+        mine = note_command()
+        on_path = shutil.which("attnroute")
+        print(f"  this install: {mine['command']}  ({mine['why']})")
+        print(f"  on PATH:      {on_path or 'nothing called attnroute is on PATH'}")
+        if on_path:
+            same = Path(on_path).resolve() == Path(
+                mine["command"].strip('"').split('" -m')[0].strip('"')).resolve()
+            if not same:
+                print("  MISMATCH: a bare `attnroute` runs a DIFFERENT install from the one "
+                      "this session's hooks use. Use the absolute path above, or reinstall "
+                      "so they agree.")
+    except Exception as exc:          # noqa: BLE001 - a diagnostic must not fail the command
+        print(f"  could not be determined: {exc!r}")
+
     # Check for keywords.json
     keywords_paths = [
         Path(".claude/keywords.json"),

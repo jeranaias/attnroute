@@ -49,9 +49,14 @@ def run(home, project, *args, stdin=None, env_extra=None):
 
 def test_the_command_the_nudge_names_exists_and_records(home, project):
     """If this fails, the nudge is pointing at nothing."""
-    from attnroute.session_state import NUDGE_TEXT
+    from attnroute.session_state import NUDGE_TEXT, note_command
 
-    assert "attnroute note add" in NUDGE_TEXT
+    # The nudge used to advise a bare `attnroute`, and on the shared machine that resolved
+    # to an older install with no `note` subcommand. It now names this install's own
+    # executable; tests/test_nudge_command.py runs the command it names.
+    assert "note add --kind ruling" in NUDGE_TEXT
+    assert note_command()["command"] in NUDGE_TEXT.format(
+        edits=1, command=note_command()["command"])
     done = run(home, project, "note", "add", "depth gate refuses unknown legs",
                "--kind", "ruling", "--session", "s")
     assert done.returncode == 0, done.stderr
