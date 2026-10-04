@@ -481,7 +481,20 @@ def _witness(ledger: "ReadLedger", payload: dict) -> int:
     return n
 
 
+_T0 = None   # set by main(); lets every record carry the hook's own latency
+
+
 def _log(record: dict) -> None:
+    if _T0 is not None:
+        record["latency_ms"] = round((time.perf_counter() - _T0) * 1000.0, 2)
+    try:
+        from attnroute.telemetry_stream import emit
+        r = dict(record)
+        emit("read_ledger", r.pop("event", "?"), session_id=r.pop("session_id", None),
+             agent_id=r.pop("agent_id", None), arm=r.pop("arm", None),
+             acting=r.pop("acting", None), **r)
+    except Exception:
+        pass
     try:
         d = Path.home() / ".claude" / "telemetry"
         d.mkdir(parents=True, exist_ok=True)
@@ -513,6 +526,8 @@ def handle(payload: dict) -> dict | None:
         if log:
             log["missed_compactions_caught"] = caught
             log["ledger_id"] = sid
+            log["session_id"] = payload.get("session_id")
+            log["agent_id"] = payload.get("agent_id")
             if log["action"] == NOTICE and not acting() and log.get("arm") == "ledger":
                 led.note_shadow_deny(log["key"])
             _log(log)
@@ -538,6 +553,8 @@ def main(argv=None) -> int:
     nothing, because a lost notice costs tokens and a raised exception costs the turn."""
     import sys
 
+    global _T0
+    _T0 = time.perf_counter()
     from attnroute.no_egress import lock_down
     lock_down()                 # a hook makes no network call, ever
     try:
