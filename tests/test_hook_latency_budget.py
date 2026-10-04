@@ -35,7 +35,7 @@ FORBIDDEN_AT_IMPORT = ("chromadb", "networkx", "model2vec", "attnroute.indexer",
 #: Every module registered as a hook entry point.
 HOOK_MODULES = ("attnroute.context_router", "attnroute.session_init",
                 "attnroute.telemetry_record", "attnroute.read_ledger",
-                "attnroute.session_state")
+                "attnroute.session_state", "attnroute.output_cap")
 
 #: Generous: the measured figures after the fix are 390 ms (context_router) and ~230 ms for
 #: the others, and an empty interpreter is already ~400 ms of that on Windows.
