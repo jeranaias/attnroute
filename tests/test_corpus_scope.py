@@ -93,6 +93,12 @@ class TestTheCorpusRootIsReturnedWithTheConfig:
         home = tmp_path / "home"
         proj = tmp_path / "meridian"
         proj.mkdir()
+        # ⚠ A REPOSITORY BOUNDARY. The upward search for a repo-local config stops at
+        #   `.git`; without one the walk climbs past tmp_path into the developer's real
+        #   home and finds THEIR ~/.claude/keywords.json -- the cross-project leak the
+        #   boundary exists to prevent, and what made these two tests fail when the
+        #   walk was unbounded.
+        (proj / ".git").mkdir()
         self._write(home / ".claude", {"keywords": {"lab.md": ["kw"]},
                                        "projects": [str(proj)]})
         monkeypatch.chdir(proj)
@@ -107,6 +113,7 @@ class TestTheCorpusRootIsReturnedWithTheConfig:
         self._write(home / ".claude", {"keywords": {"lab.md": ["kw"]}})
         proj = tmp_path / "anywhere"
         proj.mkdir()
+        (proj / ".git").mkdir()      # the repository boundary; see the note above
         monkeypatch.chdir(proj)
         monkeypatch.setattr(cr.Path, "home", staticmethod(lambda: home))
 
