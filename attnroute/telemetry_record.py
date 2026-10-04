@@ -20,6 +20,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from attnroute.turn_cost import turn_read_cost
+
 try:
     from attnroute.telemetry_lib import (
         TELEMETRY_DIR,
@@ -405,7 +407,8 @@ def update_last_turn(
     files_used: list,
     lines: list = None,
     last_entry: dict = None,
-    confidence: dict = None
+    confidence: dict = None,
+    read_cost: dict = None
 ) -> float:
     """Update the last turn record in turns.jsonl with usage data.
 
@@ -422,6 +425,14 @@ def update_last_turn(
     last = last_entry
     last["files_used"] = files_used
     last["tool_calls"] = len(tool_calls)
+
+    # ⚠ ADDITIVE AND OBSERVATION-ONLY. `tool_calls` above is a COUNT: a Read of 20 lines and a
+    #   Read of 2,000 lines are both 1, so it cannot answer "did routing save tokens". These
+    #   fields carry the token cost of the turn's tool reads, the two kinds of routing miss,
+    #   and whether the transcript window let us see the whole turn. Nothing reads them yet --
+    #   the consumer is a holdout comparison, not a reward.
+    if read_cost:
+        last.update(read_cost)
 
     injection_chars = last.get("injection_chars", 0)
     if injection_chars > 0 and files_used:
@@ -565,8 +576,30 @@ def main():
         tool_calls, files_injected, files_used, prelim_waste
     )
 
+    # What the turn COST in tool reads, and what the router missed. Observation only, and it
+    # cannot raise: `turn_read_cost` reports a failure as a field rather than losing the record.
+    # ONE RESOLVER: `resolve_transcript_path` owns ~-expansion on Windows, so turn_cost is
+    # handed a resolved Path rather than re-deriving it and drifting.
+    #
+    # ⚠ THE OFFSET IS CARRIED IN SESSION STATE, AND WITHOUT IT EVERY TURN READS A FIXED TAIL
+    #   AND REPORTS ITSELF INCOMPLETE. It is keyed by transcript path so a second project in
+    #   the same session cannot inherit the first one's position.
+    _tc_state = load_session_state()
+    _tc_offsets = _tc_state.get("transcript_offsets") or {}
+    _tc_key = str(resolve_transcript_path(transcript_path))
+    read_cost = turn_read_cost(resolve_transcript_path(transcript_path), files_injected,
+                               start_offset=_tc_offsets.get(_tc_key))
+    if read_cost.get("transcript_offset") is not None:
+        _tc_offsets[_tc_key] = read_cost["transcript_offset"]
+        # Keep the map small: one entry per transcript, newest 8.
+        if len(_tc_offsets) > 8:
+            _tc_offsets = dict(list(_tc_offsets.items())[-8:])
+        _tc_state["transcript_offsets"] = _tc_offsets
+        save_session_state(_tc_state)
+
     # Update last turn record with usage data + confidence (reuses pre-read data)
-    waste_ratio = update_last_turn(tool_calls, files_used, turn_lines, last_entry, confidence)
+    waste_ratio = update_last_turn(tool_calls, files_used, turn_lines, last_entry, confidence,
+                                   read_cost)
 
     # Update session state counters
     state = load_session_state()
