@@ -21,9 +21,19 @@ GROUPS come from the telemetry stream, not from a guess:
     observed   the session has stream records, none acting -- attnroute watched, changed nothing
     baseline   no stream records at all
 
-The headline is cost units PER TURN, treated against baseline, with a bootstrap 95% interval over
-sessions. Per turn, because sessions differ wildly in length; over sessions, because turns inside
-one session are not independent. An interval that crosses zero is reported as NOT ESTABLISHED.
+THE HEADLINE IS THE WITHIN-SESSION ARM CONTRAST: the same session, the same task, the same
+window, split only by a deterministic sha256 holdout. See `arm_contrast`. It is the headline
+because it is the only comparison here with no confound in it.
+
+Cost units PER TURN, treated against baseline, is reported too -- SECONDARY and labelled
+CONFOUNDED, because those sessions differ by project, task, phase and driver, so a gap between
+the groups is largely task mix. It is kept because the cadence lever (turns per window) lives
+there and nowhere else. Per turn, because sessions differ wildly in length; bootstrapped over
+sessions, because turns inside one session are not independent; no interval at all below five
+sessions in a group, and an interval that crosses zero is reported as NOT ESTABLISHED.
+
+⚠ `repeats_per_compaction` is a FLOOR on the quality cost, not a measure of it: it counts
+repeated tool calls and cannot see a ruling re-derived or contradicted after a compaction.
 """
 
 import json
