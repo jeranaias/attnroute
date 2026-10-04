@@ -29,6 +29,25 @@ def ledger():
     return led
 
 
+@pytest.fixture
+def ledger_arm(monkeypatch):
+    """Pin the holdout arm to "ledger".
+
+    WARNING: WITHOUT THIS, EVERY TEST THAT ASSERTS A PAYLOAD IS A 1-IN-8 COIN FLIP.
+      The arm is bucketed from the resolved file path, and pytest's `tmp_path` contains a
+      run counter (`pytest-123/...`), so the key -- and therefore the arm -- is DIFFERENT
+      on every run. 13% of runs put the file or the turn in a holdout, no payload is
+      produced, and the test fails for a reason that has nothing to do with the code. It
+      passed 469 times before it failed twice in one suite run.
+
+      The holdout tests below deliberately do NOT use this fixture: they call
+      `rl.holdout` to check the split itself.
+    """
+    real = rl.holdout
+    monkeypatch.setattr(rl, "holdout",
+                        lambda *a, **k: {**real(*a, **k), "arm": "ledger"})
+
+
 class TestANoticeNeverFiresWhenTheRepeatIsLegitimate:
     """Acceptance (a)."""
 
@@ -172,21 +191,26 @@ class TestObserveOnlyEmitsNothing:
     def test_acting_is_off_by_default(self):
         assert rl.acting() is False
 
-    def test_no_payload_while_observing(self, ledger, big):
+    def test_no_payload_while_observing(self, ledger, big, ledger_arm):
         ledger.record(str(big), tokens=2000)
         payload, log = rl.hook_decision(ledger, "s1", "Read", {"file_path": str(big)}, turn=4)
         assert payload is None
         assert log["action"] == rl.NOTICE and log["acting"] is False
         assert log["saved_tokens_est"] > 0, "the log must say what it WOULD have saved"
 
-    def test_a_payload_appears_only_when_acting(self, ledger, big, monkeypatch):
+    def test_a_payload_appears_only_when_acting(self, ledger, big, monkeypatch,
+                                               ledger_arm):
         """Positive control: the gate is what suppresses it, not a broken fixture."""
         monkeypatch.setenv(rl.ACT_ENV, "1")
         ledger.record(str(big), tokens=2000)
         payload, _ = rl.hook_decision(ledger, "s1", "Read", {"file_path": str(big)}, turn=4)
         assert payload is not None
-        assert payload["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
-        assert "attnroute:full" in payload["hookSpecificOutput"]["additionalContext"]
+        out = payload["hookSpecificOutput"]
+        assert out["hookEventName"] == "PreToolUse"
+        # The mechanism is a DENY, not an annotation: see
+        # TestActingActuallyPreventsTheRead. `additionalContext` would let the read run.
+        assert out["permissionDecision"] == "deny"
+        assert "attnroute:full" in out["permissionDecisionReason"]
 
     def test_nothing_in_the_package_sets_the_act_flag(self):
         root = Path(rl.__file__).resolve().parent
@@ -225,3 +249,240 @@ def test_save_never_raises_on_an_unwritable_path(monkeypatch, big):
     monkeypatch.setattr(rl.Path, "mkdir",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
     rl.save("s", rl.ReadLedger())          # must not raise
+
+
+# ═══ THE REVIEW ITEMS: MECHANISM, WIRING, SUBAGENTS, SECOND WITNESS ════════════════════
+
+class TestActingActuallyPreventsTheRead:
+    """The first version used `additionalContext`, WHICH DOES NOT PREVENT ANYTHING.
+
+    PreToolUse `additionalContext` appends text and the tool still runs, so the file was read
+    anyway and the notice cost 40 tokens on top: acting would have been strictly worse than
+    doing nothing, and every `saved_tokens_est` in the observe log would have been a fiction.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _acting(self, monkeypatch, ledger_arm):
+        monkeypatch.setenv(rl.ACT_ENV, "1")
+
+    def test_the_payload_denies_the_tool_call(self, ledger, big):
+        ledger.record(str(big), tokens=2000)
+        payload, _ = rl.hook_decision(ledger, "s", "Read", {"file_path": str(big)}, turn=3)
+        out = payload["hookSpecificOutput"]
+        assert out["permissionDecision"] == "deny"
+        assert "attnroute:full" in out["permissionDecisionReason"]
+
+    def test_the_payload_does_not_merely_annotate_the_read(self, ledger, big):
+        """A payload carrying only `additionalContext` would let the read through. If this
+        ever passes again, the feature has silently become a 40-token tax."""
+        ledger.record(str(big), tokens=2000)
+        payload, _ = rl.hook_decision(ledger, "s", "Read", {"file_path": str(big)}, turn=3)
+        out = payload["hookSpecificOutput"]
+        assert "additionalContext" not in out, "this does not prevent the read"
+
+    def test_the_log_names_the_mechanism(self, ledger, big):
+        ledger.record(str(big), tokens=2000)
+        _, log = rl.hook_decision(ledger, "s", "Read", {"file_path": str(big)}, turn=3)
+        assert log["mechanism"] == "deny"
+
+    def test_the_notice_does_not_tell_a_Read_to_change_its_command(self, ledger, big):
+        """Read has no `command` field, and the notice used to say "add it to the command"."""
+        ledger.record(str(big), tokens=2000)
+        text = rl.format_notice(str(big), ledger.decide(str(big)))
+        assert "to the command" not in text
+        assert "RE-ISSUE THE SAME READ" in text
+
+
+class TestObservingFollowsTheSameTrajectoryAsActing:
+    """WITHOUT THE SHADOW LEDGER, OBSERVE MODE OVER-REPORTS BY UP TO 2x.
+
+    Acting denies the repeat, so the read never happens and the one-notice allowance stays
+    spent. Observing lets the read through, PostToolUse records the key afresh, the allowance
+    resets, and the NEXT repeat logs another notice -- a saving acting could never deliver.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _pin(self, ledger_arm):
+        """Six reads must all be in the ledger arm, or the counts mean nothing."""
+
+    def _six_reads(self, monkeypatch, tmp_path, acting: bool):
+        monkeypatch.setattr(rl.Path, "home", staticmethod(lambda: tmp_path / "home"))
+        monkeypatch.delenv(rl.ACT_ENV, raising=False)
+        if acting:
+            monkeypatch.setenv(rl.ACT_ENV, "1")
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        f = tmp_path / "mod.py"
+        f.write_text("x" * 20000, encoding="utf-8")
+        notices = saved = 0
+        for _ in range(6):
+            led = rl.load("s")
+            out, log = rl.hook_decision(led, "s", "Read", {"file_path": str(f)}, turn=1)
+            if log["action"] == rl.NOTICE and log["arm"] == "ledger":
+                notices += 1
+                saved += log["saved_tokens_est"]
+                if not rl.acting():
+                    led.note_shadow_deny(log["key"])
+            rl.save("s", led)
+            if not out:
+                rl.handle({"hook_event_name": "PostToolUse", "session_id": "s",
+                           "tool_name": "Read", "tool_input": {"file_path": str(f)},
+                           "tool_response": {"file": "y" * 20000}})
+        return notices, saved
+
+    def test_the_two_arms_report_the_same_saving(self, monkeypatch, tmp_path):
+        acting = self._six_reads(monkeypatch, tmp_path / "a", acting=True)
+        observing = self._six_reads(monkeypatch, tmp_path / "b", acting=False)
+        assert observing == acting, (
+            f"observe reported {observing} where acting delivers {acting}")
+
+    def test_a_notice_is_not_served_on_every_single_repeat(self, monkeypatch, tmp_path):
+        """Positive control for the test above: if both arms simply noticed everything, the
+        equality would hold and mean nothing. Six reads alternate, so three notices."""
+        notices, _ = self._six_reads(monkeypatch, tmp_path / "c", acting=True)
+        assert notices == 3, notices
+
+
+class TestASubagentIsADifferentConversation:
+    """A subagent's hook events carry the PARENT's session_id plus their own agent_id."""
+
+    def test_the_ledger_id_separates_them(self):
+        main = {"session_id": "abc"}
+        sub = {"session_id": "abc", "agent_id": "sub-7"}
+        assert rl.ledger_id(main) == "abc"
+        assert rl.ledger_id(sub) != rl.ledger_id(main)
+        assert "sub-7" in rl.ledger_id(sub)
+
+    def test_a_subagents_read_cannot_notice_the_main_loop(self, monkeypatch, tmp_path, big,
+                                                          ledger_arm):
+        """THE QUALITY BUG THIS PREVENTS: a notice sent to the main loop about content that
+        only ever existed in a subagent's context -- a read the recipient never saw."""
+        monkeypatch.setattr(rl.Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setenv(rl.ACT_ENV, "1")
+        rl.handle({"hook_event_name": "PostToolUse", "session_id": "abc",
+                   "agent_id": "sub-7", "tool_name": "Read",
+                   "tool_input": {"file_path": str(big)},
+                   "tool_response": {"file": "z" * 20000}})
+
+        out = rl.handle({"hook_event_name": "PreToolUse", "session_id": "abc",
+                         "tool_name": "Read", "tool_input": {"file_path": str(big)}})
+        assert out is None, "the main loop was denied a read only the subagent had seen"
+
+    def test_the_subagents_own_repeat_is_still_noticed(self, monkeypatch, tmp_path, big,
+                                                       ledger_arm):
+        """Positive control: separating them must not disable the ledger inside a subagent."""
+        monkeypatch.setattr(rl.Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setenv(rl.ACT_ENV, "1")
+        sub = {"session_id": "abc", "agent_id": "sub-7", "tool_name": "Read",
+               "tool_input": {"file_path": str(big)}}
+        rl.handle({**sub, "hook_event_name": "PostToolUse",
+                   "tool_response": {"file": "z" * 20000}})
+        out = rl.handle({**sub, "hook_event_name": "PreToolUse"})
+        assert out is not None
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+class TestTheWiring:
+    """Unwired, this module is inert and its observe log is empty -- which reads exactly like
+    a lever that does not pay."""
+
+    @pytest.fixture(autouse=True)
+    def _home(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(rl.Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.delenv(rl.ACT_ENV, raising=False)
+
+    def _read(self, big):
+        rl.handle({"hook_event_name": "PostToolUse", "session_id": "s", "tool_name": "Read",
+                   "tool_input": {"file_path": str(big)},
+                   "tool_response": {"file": "q" * 20000}})
+
+    def test_PostToolUse_on_a_Read_records_it(self, big):
+        self._read(big)
+        assert rl.load("s").decide(str(big))["action"] == rl.NOTICE
+
+    def test_PostToolUse_on_an_Edit_invalidates_it(self, big):
+        self._read(big)
+        rl.handle({"hook_event_name": "PostToolUse", "session_id": "s", "tool_name": "Edit",
+                   "tool_input": {"file_path": str(big)}, "tool_response": {}})
+        assert rl.load("s").decide(str(big))["action"] == rl.ALLOW
+
+    def test_SessionStart_compact_clears_the_window(self, big):
+        self._read(big)
+        rl.handle({"hook_event_name": "SessionStart", "session_id": "s", "source": "compact"})
+        assert rl.load("s").decide(str(big))["action"] == rl.ALLOW
+
+    def test_SessionStart_for_any_other_reason_does_not(self, big):
+        self._read(big)
+        rl.handle({"hook_event_name": "SessionStart", "session_id": "s", "source": "startup"})
+        assert rl.load("s").decide(str(big))["action"] == rl.NOTICE
+
+    def test_Stop_advances_the_turn(self):
+        for _ in range(3):
+            rl.handle({"hook_event_name": "Stop", "session_id": "s"})
+        assert rl.load("s").state["turn"] == 3
+
+    def test_the_turn_is_what_the_notice_quotes(self, big):
+        rl.handle({"hook_event_name": "Stop", "session_id": "s"})
+        rl.handle({"hook_event_name": "Stop", "session_id": "s"})
+        self._read(big)
+        assert rl.load("s").decide(str(big))["prior_turn"] == 2
+
+    def test_a_malformed_event_never_raises(self):
+        assert rl.handle({"hook_event_name": "PostToolUse", "session_id": "s",
+                          "tool_name": "Read", "tool_input": None}) is None
+        assert rl.handle({}) is None
+
+    def test_main_exits_zero_on_rubbish_stdin(self, monkeypatch):
+        """A measurement must never cost the user their turn."""
+        import io as _io
+        monkeypatch.setattr("sys.stdin", _io.StringIO("not json at all"))
+        assert rl.main() == 0
+
+
+class TestTheSecondWitnessForCompaction:
+    """If the compact hook does not fire, entries survive into a window that no longer holds
+    the content -- and the ledger then suppresses reads of material the model cannot see.
+    That is the worst failure this module has, so it does not rest on one signal."""
+
+    def test_a_compaction_marker_in_the_transcript_is_caught(self, tmp_path, big):
+        t = tmp_path / "t.jsonl"
+        t.write_text('{"type":"assistant"}\n' * 50, encoding="utf-8")
+        led = rl.ReadLedger()
+        rl._witness(led, {"transcript_path": str(t)})      # first look: establish the offset
+        led.record(str(big), tokens=2000)
+        assert led.decide(str(big))["action"] == rl.NOTICE
+
+        with open(t, "a", encoding="utf-8") as fh:
+            fh.write('{"isCompactSummary":true,"message":{"content":"summary"}}\n')
+        caught = rl._witness(led, {"transcript_path": str(t)})
+
+        assert caught == 1
+        assert led.decide(str(big))["action"] == rl.ALLOW
+        assert led.state["missed_compactions"] == 1
+
+    def test_the_first_look_claims_nothing(self, tmp_path):
+        """There is no stored offset on the first call, so a scan would see markers from
+        earlier in the session. It records the offset and reports none."""
+        t = tmp_path / "t.jsonl"
+        t.write_text('{"isCompactSummary":true}\n' * 10, encoding="utf-8")
+        led = rl.ReadLedger()
+        assert rl._witness(led, {"transcript_path": str(t)}) == 0
+        assert led.state["transcript_offset"] == t.stat().st_size
+
+    def test_an_absent_transcript_is_not_a_compaction(self, tmp_path):
+        led = rl.ReadLedger()
+        assert rl._witness(led, {"transcript_path": str(tmp_path / "nope.jsonl")}) == 0
+
+
+def test_the_save_is_atomic(tmp_path, monkeypatch, big):
+    """Parallel tool calls run this concurrently. A half-written file makes `load` fall back
+    to an EMPTY ledger, which looks exactly like a ledger that never fires."""
+    monkeypatch.setattr(rl.Path, "home", staticmethod(lambda: tmp_path))
+    src = Path(rl.__file__).read_text(encoding="utf-8")
+    assert "os.replace(tmp, p)" in src, "a plain write_text can be observed half-written"
+
+    led = rl.ReadLedger()
+    led.record(str(big), tokens=2000)
+    rl.save("s", led)
+    d = tmp_path / ".claude" / "telemetry"
+    assert not [p for p in d.iterdir() if p.name.endswith(".tmp")], "temp file left behind"
+    assert rl.load("s").decide(str(big))["action"] == rl.NOTICE

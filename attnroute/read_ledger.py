@@ -19,8 +19,12 @@ window the multiplier is large, but the ledger's share of the whole bill is abou
 
 ═══ FOUR RULES, EACH FROM A WAY THIS COULD GO WRONG ═══
 
-1. NEVER A DENY. A repeat read gets a NOTICE with the outline and an explicit way to force the
-   full read. A hook that strands the model is worse than a re-read.
+1. NO DENY THAT CANNOT BE UNDONE ON THE SPOT. Acting DOES deny the tool call -- that is the
+   only mechanism that removes the tokens, because `additionalContext` ADDS text and lets the
+   read run, which costs 40 tokens and saves none. So every deny carries its own way out in
+   `permissionDecisionReason`, and the SECOND ask for the same key is always served in full.
+   A hook that strands the model is worse than a re-read; a hook that only annotates it is
+   worse than nothing.
 2. STRICT KEYS. The 27.6% figure came from BASENAME matching, which conflates two different
    `__init__.py`. Sizing may be aggressive; a DECISION may not. This uses the resolved full
    path plus the range, which is the conservative 20.4% of the same measurement.
@@ -54,6 +58,12 @@ def read_key(path: str, offset=None, limit=None) -> str:
     ⚠ Not the basename. The measurement that sized this lever used basenames and reported
       27.6%; a decision made on a basename would serve the wrong file's outline for any repo
       with two `__init__.py`. The strict key is the 20.4% arm of the same measurement.
+
+    WARNING: A RANGE IS PART OF THE KEY, SO AN IDENTICAL RANGED REPEAT *IS* NOTICED. An
+      earlier comment in `hook_decision` claimed an explicit range was "never
+      second-guessed"; it is not exempt, it is keyed. Reading lines 1-50 twice, unchanged,
+      is the same repeat as reading the whole file twice. A DIFFERENT range is a different
+      key and is always allowed.
     """
     try:
         p = str(Path(path).expanduser().resolve()).lower()
@@ -84,6 +94,27 @@ class ReadLedger:
 
     def __init__(self, state: dict | None = None):
         self.state = state or {"window": 0, "entries": {}, "turn": 0}
+        self.state.setdefault("shadow", {})
+
+    # ---- observing must follow the same trajectory as acting -------------------------
+    def note_shadow_deny(self, key: str):
+        """WARNING: WITHOUT THIS, OBSERVE MODE OVER-REPORTS BY UP TO 2x.
+
+        When acting, a NOTICE denies the call: the read never happens, so nothing re-records
+        the key and the one-notice allowance stays spent. When observing, the read DOES
+        happen, PostToolUse records it afresh, the allowance resets -- and the next repeat
+        logs another NOTICE. The log would then claim a saving on reads that acting mode
+        could never have suppressed.
+
+        So while observing, a key that WOULD have been denied is marked here, and the
+        PostToolUse that follows declines to record it. The two arms then diverge only in
+        what the model sees, which is the thing being measured.
+        """
+        self.state.setdefault("shadow", {})[key] = self.state.get("turn", 0)
+
+    def take_shadow_deny(self, key: str) -> bool:
+        """Was this key shadow-denied? Clears the mark; True means do not record."""
+        return self.state.setdefault("shadow", {}).pop(key, None) is not None
 
     # ---- lifecycle -------------------------------------------------------------------
     def on_compaction(self):
@@ -94,6 +125,7 @@ class ReadLedger:
         """
         self.state["window"] = int(self.state.get("window", 0)) + 1
         self.state["entries"] = {}
+        self.state["shadow"] = {}
 
     def on_edit(self, path: str):
         """Any write to a path drops every entry for it, at any range."""
@@ -122,8 +154,9 @@ class ReadLedger:
     def decide(self, path: str, offset=None, limit=None, forced: bool = False) -> dict:
         """Should this read proceed, or get a notice? -> dict
 
-        Returns {"action", "reason", "saved_tokens_est", "prior_turn"}. NEVER raises and never
-        returns a deny: the only two actions are ALLOW and NOTICE.
+        Returns {"action", "reason", "saved_tokens_est", "prior_turn"}. NEVER raises. The two
+        actions are ALLOW and NOTICE; NOTICE becomes a PreToolUse deny in `hook_decision`,
+        which the next identical request overrides.
         """
         out = {"action": ALLOW, "reason": "", "saved_tokens_est": 0, "prior_turn": None}
         if forced:
@@ -170,8 +203,10 @@ def format_notice(path: str, decision: dict, outline: str | None = None) -> str:
     lines = [
         f"[attnroute] {path} was read at turn {decision.get('prior_turn')} in this context "
         f"window and has not changed since.",
-        "To read it in full anyway, add `attnroute:full` to the command or re-issue the "
-        "same read immediately.",
+        # It used to say "add attnroute:full to the command". Read has no command, so for
+        # the one tool this fires on, the instruction named a field that does not exist.
+        "To read it in full, RE-ISSUE THE SAME READ -- the second request is always served. "
+        "`attnroute:full` anywhere in the input also forces a full read.",
     ]
     if outline:
         lines.append("")
@@ -193,6 +228,24 @@ def is_forced(tool_input: dict) -> bool:
 
 
 # ---- persistence ---------------------------------------------------------------------
+def ledger_id(payload: dict) -> str:
+    """WARNING: THE LEDGER IS PER CONVERSATION, AND A SUBAGENT IS A DIFFERENT CONVERSATION.
+
+    Subagent hook events carry the PARENT's `session_id` plus their own `agent_id`. Keyed on
+    session alone, a subagent's read would make the MAIN loop get a notice for content that
+    only ever existed in the subagent's context -- a notice about a read the recipient never
+    saw, which is the exact failure this module exists to avoid.
+
+    `agent_id` is absent for the main loop and present for a subagent; the installed CLI's
+    own built-in PostToolUse hook distinguishes them the same way (`agent_id !== undefined`).
+    """
+    if not isinstance(payload, dict):
+        return "x"
+    sid = str(payload.get("session_id") or "x")
+    aid = payload.get("agent_id")
+    return sid if aid in (None, "") else f"{sid}.agent-{aid}"
+
+
 def ledger_path(session_id: str) -> Path:
     return (Path.home() / ".claude" / "telemetry"
             / f"read_ledger.{session_id or 'x'}.json")
@@ -207,12 +260,30 @@ def load(session_id: str) -> ReadLedger:
 
 
 def save(session_id: str, ledger: ReadLedger) -> None:
+    """WARNING: TEMP + RENAME, because parallel tool calls run this concurrently.
+
+    Several PreToolUse and PostToolUse hooks for one assistant turn can be in flight at once.
+    A plain `write_text` can be observed half-written by another process, and `load` would
+    then fall back to an EMPTY ledger -- losing the window silently, which looks exactly like
+    a ledger that simply never fires. `os.replace` is atomic on POSIX and on Windows, so a
+    reader sees either the old file or the new one.
+
+    The remaining race is last-writer-wins on the in-memory copy: two concurrent reads of
+    different files can each save a state missing the other's entry. That costs a MISSED
+    notice, never a wrong one, so it is left unlocked.
+    """
     p = ledger_path(session_id)
+    tmp = p.with_name(p.name + f".{os.getpid()}.tmp")
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(ledger.state), encoding="utf-8")
+        tmp.write_text(json.dumps(ledger.state), encoding="utf-8")
+        os.replace(tmp, p)
     except OSError:
-        pass          # a measurement must never cost the user their turn
+        # A measurement must never cost the user their turn.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 # ═══ ACTING vs OBSERVING, AND THE HOLDOUT ══════════════════════════════════════════════════
@@ -287,9 +358,196 @@ def hook_decision(ledger: "ReadLedger", session_id: str, tool_name: str, tool_in
            "saved_tokens_est": decision["saved_tokens_est"], "acting": acting(),
            "forced": forced, **arm}
 
-    # An explicit range the caller asked for is never second-guessed, and a held-out read is
-    # left alone so its arm measures the world without the ledger in it.
+    # A held-out read is left alone so its arm measures the world without the ledger in it.
     if arm["arm"] != "ledger" or decision["action"] != NOTICE or not acting():
         return None, log
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                   "additionalContext": format_notice(path, decision)}}, log
+
+    # WARNING: DENY, NOT additionalContext. THIS WAS THE WHOLE POINT AND I HAD IT WRONG.
+    #   `additionalContext` on PreToolUse APPENDS text and the tool still runs: the file is
+    #   read anyway and the notice costs 40 tokens on top. Acting that way would have made
+    #   every "saved_tokens_est" in the observe-mode logs a fiction. Only
+    #   `permissionDecision: "deny"` stops the call, and the reason string is what the model
+    #   sees -- so the reason IS the notice, escape hatch and all. Verified against the hook
+    #   contract in the installed CLI: PreToolUse takes allow|deny|ask plus
+    #   permissionDecisionReason.
+    log["mechanism"] = "deny"
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": format_notice(path, decision)}}, log
+
+
+# ═══ THE WIRING: WHICH HOOK EVENT DOES WHAT ════════════════════════════════════════════
+#
+# WARNING: UNWIRED, THIS MODULE IS INERT AND ITS OBSERVE LOG IS EMPTY -- which reads exactly
+#   like a lever that does not pay. `record`, `on_edit`, `on_compaction` and the turn counter
+#   are each driven by a different event, and all five registrations are needed:
+#
+#     PreToolUse   Read                      -> decide (and deny, when acting)
+#     PostToolUse  Read                      -> record, with tokens from the result
+#     PostToolUse  Edit|Write|NotebookEdit   -> on_edit
+#     SessionStart source=compact / PreCompact -> on_compaction
+#     Stop                                   -> turn += 1
+#
+# The turn counter lives on Stop because that is the one event that fires once per assistant
+# turn. Counting tool calls instead would make "read at turn 9" mean something the transcript
+# does not say.
+EDIT_TOOLS = ("Edit", "Write", "NotebookEdit", "MultiEdit")
+
+#: Where the observe-mode log lands, one JSON object per decision.
+LOG_NAME = "read_ledger.jsonl"
+
+
+def response_tokens(payload: dict) -> int:
+    """How big was the read that just happened? Estimated from the result text.
+
+    The exact number only has to be good enough to compare against MIN_TOKENS_TO_NOTICE and
+    to total a saving, and it is recorded as an ESTIMATE in the log for that reason.
+    """
+    r = payload.get("tool_response") if isinstance(payload, dict) else None
+    text = ""
+    if isinstance(r, str):
+        text = r
+    elif isinstance(r, dict):
+        for k in ("file", "content", "stdout", "text"):
+            v = r.get(k)
+            if isinstance(v, str):
+                text += v
+            elif isinstance(v, dict) and isinstance(v.get("content"), str):
+                text += v["content"]
+    elif isinstance(r, list):
+        text = "".join(x.get("text", "") for x in r if isinstance(x, dict))
+    try:
+        from attnroute.telemetry_lib import estimate_tokens_from_chars
+        return int(estimate_tokens_from_chars(len(text), kind="code"))
+    except Exception:
+        return max(0, len(text) // 4)
+
+
+def compactions_since(transcript_path, offset):
+    """(count, new_offset): compaction markers appended to the transcript since `offset`.
+
+    WARNING: THE SECOND WITNESS FOR RULE 3, AND IT EXISTS BECAUSE THE FIRST ONE CAN MISS.
+      `on_compaction` depends on a SessionStart:compact or PreCompact hook firing. If that
+      registration is absent, fails, or the compaction happens in a way that does not reach
+      it, every entry survives into a window that no longer holds the content -- and then the
+      ledger suppresses reads of material the model genuinely cannot see. That is the worst
+      failure this module has, so it does not rest on one signal.
+
+      Compaction APPENDS a summary entry to the same transcript rather than truncating it, so
+      the witness is the marker, not the file size. Scanning starts at the stored offset, so
+      the cost is the bytes written since the last tool call.
+
+      On the FIRST call there is no stored offset and the scan would see markers from earlier
+      in the session, so it only records the offset and reports none. The ledger is empty at
+      that point anyway, so there is nothing to protect.
+    """
+    try:
+        from attnroute.turn_cost import read_span
+        from pathlib import Path as _P
+        p = _P(str(transcript_path))
+        if not p.is_file():
+            return 0, offset
+        lines, new_offset, complete = read_span(p, offset)
+        if not complete:
+            return 0, new_offset          # first look: establish the offset, claim nothing
+        n = 0
+        for line in lines:
+            if '"isCompactSummary":true' in line.replace(" ", "") or '"compactMetadata"' in line:
+                n += 1
+        return n, new_offset
+    except Exception:
+        return 0, offset
+
+
+def _witness(ledger: "ReadLedger", payload: dict) -> int:
+    """Catch a compaction the compact hook did not report. Returns how many it caught."""
+    n, new_offset = compactions_since(payload.get("transcript_path"),
+                                      ledger.state.get("transcript_offset"))
+    ledger.state["transcript_offset"] = new_offset
+    for _ in range(n):
+        ledger.on_compaction()
+    if n:
+        ledger.state["missed_compactions"] = int(
+            ledger.state.get("missed_compactions", 0)) + n
+    return n
+
+
+def _log(record: dict) -> None:
+    try:
+        d = Path.home() / ".claude" / "telemetry"
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / LOG_NAME, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except OSError:
+        pass          # a measurement must never cost the user their turn
+
+
+def handle(payload: dict) -> dict | None:
+    """One hook event -> the payload to print, or None. Pure apart from load/save."""
+    event = str(payload.get("hook_event_name") or "")
+    sid = ledger_id(payload)
+    led = load(sid)
+    out = None
+
+    if event == "SessionStart":
+        if str(payload.get("source") or "") == "compact":
+            led.on_compaction()
+    elif event == "PreCompact":
+        led.on_compaction()
+    elif event == "Stop":
+        led.state["turn"] = int(led.state.get("turn", 0)) + 1
+    elif event == "PreToolUse":
+        caught = _witness(led, payload)
+        out, log = hook_decision(led, sid, str(payload.get("tool_name") or ""),
+                                 payload.get("tool_input") or {},
+                                 turn=led.state.get("turn", 0))
+        if log:
+            log["missed_compactions_caught"] = caught
+            log["ledger_id"] = sid
+            if log["action"] == NOTICE and not acting() and log.get("arm") == "ledger":
+                led.note_shadow_deny(log["key"])
+            _log(log)
+    elif event == "PostToolUse":
+        tool = str(payload.get("tool_name") or "")
+        ti = payload.get("tool_input") or {}
+        if not isinstance(ti, dict):
+            ti = {}
+        if tool in EDIT_TOOLS:
+            led.on_edit(str(ti.get("file_path") or ti.get("notebook_path") or ""))
+        elif tool == "Read" and ti.get("file_path"):
+            key = read_key(str(ti["file_path"]), ti.get("offset"), ti.get("limit"))
+            if not led.take_shadow_deny(key):
+                led.record(str(ti["file_path"]), ti.get("offset"), ti.get("limit"),
+                           tokens=response_tokens(payload))
+
+    save(sid, led)
+    return out
+
+
+def main(argv=None) -> int:
+    """Hook entry point. NEVER fails the caller's turn: every error exits 0 and prints
+    nothing, because a lost notice costs tokens and a raised exception costs the turn."""
+    import sys
+    try:
+        raw = sys.stdin.read()
+    except Exception:
+        return 0
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except (ValueError, TypeError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        out = handle(payload)
+    except Exception as exc:                       # noqa: BLE001 - see the docstring
+        _log({"event": "read_ledger_error", "error": repr(exc)[:300]})
+        return 0
+    if out:
+        print(json.dumps(out))
+    return 0
+
+
+if __name__ == "__main__":        # pragma: no cover - exercised through main()
+    raise SystemExit(main())
