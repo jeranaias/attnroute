@@ -479,10 +479,36 @@ def load_keyword_config() -> tuple[dict[str, list[str]], dict[str, list[str]], l
     #
     #   So the config now returns the ROOT IT CAME FROM, main() uses that root, and the two
     #   cannot diverge. One fact, one owner.
-    config_paths = [
-        Path(".claude/keywords.json"),
-        Path.home() / ".claude" / "keywords.json"
-    ]
+    # ⚠ WALK UP FROM THE CWD. The previous list was `Path(".claude/keywords.json")`, which is
+    #   relative to the CWD -- so a repo-local corpus was found ONLY when the session happened
+    #   to start at the repository root. Every team session here runs in its own worktree and a
+    #   hook's CWD can be any directory inside it, so the config has to be found the way git
+    #   finds `.git`: by walking up. Bounded by the filesystem root, and the first one wins.
+    config_paths = []
+    probe = Path.cwd().resolve()
+    try:
+        home_claude = (Path.home() / ".claude").resolve()
+    except (OSError, RuntimeError):
+        home_claude = None
+    for parent in [probe, *probe.parents]:
+        candidate = parent / ".claude" / "keywords.json"
+        # ⚠ THE HOME CONFIG IS NOT A REPO-LOCAL FIND, EVEN THOUGH ~ IS AN ANCESTOR OF MOST
+        #   CHECKOUTS. Without this, a repository under the home directory picks the GLOBAL
+        #   corpus up as though it were its own, with the root set to ~/.claude -- which is
+        #   exactly the cross-project leak the absent-document filter exists to prevent. Two
+        #   tests caught it when the walk was unbounded.
+        if home_claude is not None and candidate.parent.resolve() == home_claude:
+            break
+        if candidate.is_file():
+            config_paths.append(candidate)
+            break
+        # ⚠ BOUNDED BY THE REPOSITORY, NOT BY THE FILESYSTEM ROOT. "Repo-local" means inside
+        #   this checkout, and a `.git` entry is what marks the boundary -- the same thing git
+        #   itself stops at. Walking past it would reach into a parent directory that has
+        #   nothing to do with this project.
+        if (parent / ".git").exists():
+            break
+    config_paths.append(Path.home() / ".claude" / "keywords.json")
 
     for config_path in config_paths:
         if config_path.exists():
@@ -514,7 +540,18 @@ def load_keyword_config() -> tuple[dict[str, list[str]], dict[str, list[str]], l
                     #   time, and the config is loaded at import while main() uses the
                     #   root later -- so a relative root is a second resolution wearing
                     #   a different hat. Caught by a test that compared the two.
-                    return keywords, co_activation, pinned, config_path.parent.resolve()
+                    # ⚠ THE ROOT MAY BE DECLARED, AND IT DEFAULTS TO THE CONFIG'S DIRECTORY.
+                    #   A repo-local corpus wants the ROOT to be the repository, so its paths
+                    #   read `docs/decisions/0001-....md` rather than `../docs/...` -- and an
+                    #   entry with `..` in it is refused outright by `_within_root`, so the
+                    #   root has to be declared rather than reached around.
+                    #   Resolved relative to the config file; `".."` from `<repo>/.claude` is
+                    #   `<repo>`. Default keeps every existing config working unchanged.
+                    declared_root = config.get("corpus_root")
+                    root = config_path.parent.resolve()
+                    if declared_root:
+                        root = (config_path.parent / str(declared_root)).resolve()
+                    return keywords, co_activation, pinned, root
             except (json.JSONDecodeError, Exception) as e:
                 print(f"[attnroute] WARN:Failed to load {config_path}: {e}", file=sys.stderr)
                 continue
@@ -560,8 +597,30 @@ _DEFAULT_CO_ACTIVATION: dict[str, list[str]] = {}
 KEYWORDS, CO_ACTIVATION, _LOADED_PINNED, CORPUS_ROOT = load_keyword_config()
 
 
+def _within_root(root: Path, rel: str) -> bool:
+    """Does `rel` stay inside `root` once resolved? -> bool
+
+    ⚠⚠ THIS IS A FILE-DISCLOSURE CHECK, NOT PATH HYGIENE. `keywords.json` is a plain JSON
+      file that gets committed to shared repositories, and a HOT document's CONTENT is read
+      with `read_text()` and written to stdout -- which IS the model's prompt. So a corpus
+      entry of `../../../.ssh/id_rsa` would inject that file.
+
+      MEASURED, because `is_file()` alone does not stop it: with root `~/.claude`, the path
+      `../../../Windows/win.ini` returns is_file() True and resolves to C:\\Windows\\win.ini.
+      The absent-document filter would have KEPT it.
+
+      `resolve()` also collapses symlinks, so a link inside the corpus pointing outside it is
+      caught by the same comparison.
+    """
+    try:
+        return (Path(root) / rel).resolve().is_relative_to(Path(root).resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def _drop_absent_docs(keywords: dict, pinned: list, root) -> tuple[dict, list, list]:
-    """Keep only documents that EXIST under `root`. -> (keywords, pinned, dropped)
+    """Keep only documents that EXIST under `root`, and that stay inside it.
+    -> (keywords, pinned, dropped)
 
     ⚠⚠ A DOCUMENT THAT IS NOT THERE CANNOT BE ROUTED, AND SCORING ONE IS NOT HARMLESS.
       Issue #10 reported `systems/network.md` injected 1,699 times -- 99.6% of all injection
@@ -578,15 +637,26 @@ def _drop_absent_docs(keywords: dict, pinned: list, root) -> tuple[dict, list, l
     """
     if root is None:
         return keywords, pinned, []
-    kept, dropped = {}, []
+    kept, dropped, escaped = {}, [], []
     for doc, kws in (keywords or {}).items():
         try:
-            if (Path(root) / doc).is_file():
+            if not _within_root(Path(root), doc):
+                # ⚠ REPORTED APART FROM "absent". The remedies differ: an escaping entry is a
+                #   config to fix, an absent one is a document to write -- and only one of the
+                #   two is a disclosure risk.
+                escaped.append(doc)
+            elif (Path(root) / doc).is_file():
                 kept[doc] = kws
             else:
                 dropped.append(doc)
         except OSError:
             dropped.append(doc)
+    if escaped:
+        print(f"[attnroute] REFUSED {len(escaped)} corpus entries that resolve OUTSIDE "
+              f"{root}: {', '.join(sorted(escaped)[:5])}"
+              f"{' ...' if len(escaped) > 5 else ''}. A corpus entry names a document to be "
+              f"READ INTO A PROMPT, so it may not leave the corpus root.", file=sys.stderr)
+        dropped.extend(escaped)
     kept_pinned = [d for d in (pinned or []) if d in kept]
     return kept, kept_pinned, dropped
 
