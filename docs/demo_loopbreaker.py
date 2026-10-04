@@ -12,7 +12,7 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RESET = "\033[0m"
 
-print(f">> fix the JWT validation error in auth.py")
+print(">> fix the JWT validation error in auth.py")
 print()
 print(f"  {RED}{BOLD}Without LoopBreaker:{RESET}")
 print(f"  Edit auth.py  {RED}tests fail{RESET}")
@@ -25,6 +25,6 @@ print(f"  {RED}{BOLD}Same file. Same approach. Burns your tokens forever.{RESET}
 print()
 print(f"  {GREEN}{BOLD}With LoopBreaker:{RESET}")
 print(f"  {BOLD}5 attempts detected.{RESET} Stop and re-read.")
-print(f"  Read auth.py, conftest.py, test_auth.py")
+print("  Read auth.py, conftest.py, test_auth.py")
 print(f"  Edit {BOLD}conftest.py{RESET}  {GREEN}{BOLD}tests pass!{RESET}")
 print(f"  {GREEN}{BOLD}Different file was the real problem.{RESET}")

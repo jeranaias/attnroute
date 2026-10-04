@@ -1934,7 +1934,26 @@ class TestWeeklySummary:
         summary1 = state.get("weekly_summary", {}).get("tokens", 0)
         last_update = state.get("last_weekly_update", "")
 
-        # Second call same day — should not re-compute
+        assert summary1 > 0, "the fixture must produce a non-zero summary, or the equality below is vacuous"
+
+        # MORE SESSION DATA ARRIVES BEFORE THE SECOND CALL, so a re-compute would produce a
+        # DIFFERENT figure. Without this the value comparison CANNOT FAIL: a re-compute over
+        # unchanged data is idempotent and returns the same number, so asserting equality
+        # would prove nothing about whether the work was repeated.
+        _write_jsonl(mock_project / "session.jsonl", [
+            _assistant_entry(minutes_ago=5, request_id="req_001",
+                             input_tokens=100, output_tokens=50),
+            _assistant_entry(minutes_ago=4, request_id="req_002",
+                             input_tokens=500, output_tokens=250),
+        ])
+
+        # Second call same day -- should not re-compute
         plugin.on_stop([], {})
         state = plugin.load_state()
         assert state.get("last_weekly_update") == last_update
+        # ...and the SUMMARY ITSELF is unchanged, which is what the test NAME claims. An
+        # unchanged timestamp does not prove the figure was not recomputed: a re-compute that
+        # rewrote the same timestamp would pass the assertion above. `summary1` was captured
+        # for exactly this comparison and the comparison was never made -- ruff's F841 was the
+        # only thing pointing at it, and CI's ignore list suppressed F841.
+        assert state.get("weekly_summary", {}).get("tokens", 0) == summary1

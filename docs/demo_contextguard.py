@@ -12,7 +12,7 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RESET = "\033[0m"
 
-print(f">> wire up the WebSocket handlers")
+print(">> wire up the WebSocket handlers")
 print(f"  {DIM}Turn 65  |  16 active files{RESET}")
 print()
 print(f"  {RED}{BOLD}Without ContextGuard:{RESET}")

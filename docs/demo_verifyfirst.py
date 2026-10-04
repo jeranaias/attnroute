@@ -12,7 +12,7 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RESET = "\033[0m"
 
-print(f">> fix the token refresh bug in auth.py")
+print(">> fix the token refresh bug in auth.py")
 print()
 print(f"  {RED}{BOLD}Without VerifyFirst:{RESET}")
 print(f"  Claude {DIM}\"remembers\"{RESET} auth.py from 14 turns ago...")

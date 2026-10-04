@@ -12,10 +12,10 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RESET = "\033[0m"
 
-print(f">> refactor the auth module to use JWT")
+print(">> refactor the auth module to use JWT")
 print()
 print(f"  {RED}{BOLD}Without BurnRate:{RESET}")
-print(f"  Turn 40... Turn 50... Turn 60...")
+print("  Turn 40... Turn 50... Turn 60...")
 print(f"  {RED}{BOLD}Rate limit hit. Session dead.{RESET}")
 print(f"  {RED}No warning. Mid-task. Work lost.{RESET}")
 print()
