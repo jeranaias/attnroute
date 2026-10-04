@@ -539,6 +539,12 @@ def cmd_note(args):
     promotion = check_promotion(note, args.repo or ".")
     print(f"[attnroute] recorded {note['kind']} {note['id']}: {promotion['state']} "
           f"({promotion['why']})", file=sys.stderr)
+    if promotion["state"] == "UNPROMOTED":
+        # Said once, where the operator is looking, rather than left to be discovered when a
+        # ruling goes missing after a restart.
+        print("[attnroute] to make it outlive this session, re-run with "
+              "--promoted-to <repo path>, or `attnroute board set --team <T> --file -`",
+              file=sys.stderr)
     # ⚠ An unsupported claim is reported as a FAILURE of the command, not a detail in
     #   passing. "promoted_to: docs/x.md" when docs/x.md says nothing about this note is
     #   worse than no claim at all, because every listing afterwards reads it as filed.
