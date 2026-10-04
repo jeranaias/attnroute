@@ -108,6 +108,8 @@ def eligible(tool_name: str, tool_input) -> tuple:
     return True, ""
 
 
+#: LIMITATION, stated: this sees a trap written in the command itself, not one set by a file the
+#: command sources (`. ./env.sh`). Such a command is still eligible and would lose its output.
 _TRAP = re.compile(r"\btrap\b")
 
 #: Captured outputs older than this are swept, and at most this many are kept.
@@ -152,7 +154,7 @@ def wrap(command: str, out_path: str) -> str:
         f"to see everything."
     ).replace("'", "'\"'\"'")
     show = (
-        "__ar_show() { __ar_rc=$?; "
+        "__ar_show() { __ar_rc=$?; { "
         f"if [ -f {f} ]; then "
         f"__ar_n=$(wc -c < {f} | tr -d ' '); "
         f"if [ \"$__ar_n\" -gt {CAP_CHARS} ]; then "
@@ -160,10 +162,13 @@ def wrap(command: str, out_path: str) -> str:
         f"printf '\\n...\\n{note}\\n...\\n' \"{HEAD_CHARS + TAIL_CHARS}\" \"$__ar_n\"; "
         f"tail -c {TAIL_CHARS} {f}; "
         f"else cat {f}; rm -f {f}; fi; fi; "
-        "return $__ar_rc; }; "
+        "} >&9; return $__ar_rc; }; "
         "trap '__ar_show' EXIT"
     )
-    return f"{show}\n{{\n{command}\n}} > {f} 2>&1\n"
+    # fd 9 is the ORIGINAL stdout, saved before the group redirects. An `exit N` inside the
+    # command runs the EXIT trap with the group's redirection still in effect, so without fd 9
+    # the capped output would be written back into the capture file, where nobody reads it.
+    return f"exec 9>&1\n{show}\n{{\n{command}\n}} > {f} 2>&1\n"
 
 
 def capped_chars(n: int) -> int:

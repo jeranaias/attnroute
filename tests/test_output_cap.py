@@ -160,6 +160,22 @@ class TestRewriteInARealShell:
         r = _run(script, tmp_path)
         assert r.returncode == 7 and "out" in r.stdout   # exit inside still prints
 
+    def test_big_output_then_exit_n_still_reaches_stdout(self, tmp_path):
+        """The OUTPUT must arrive, not just the status: with an early exit the trap runs while
+        the group's redirection is live, and without fd 9 the cap went back into the file."""
+        script, _ = self._wrapped(
+            "printf 'HEADMARK\\n'; head -c 20000 /dev/zero | tr '\\0' 'x'; "
+            "printf '\\nTAILMARK\\n'; exit 7", tmp_path)
+        r = _run(script, tmp_path)
+        assert r.returncode == 7
+        assert "HEADMARK" in r.stdout and "TAILMARK" in r.stdout
+        assert "[attnroute] output capped" in r.stdout
+
+    def test_small_output_then_exit_n_reaches_stdout(self, tmp_path):
+        script, _ = self._wrapped("echo small-body; exit 3", tmp_path)
+        r = _run(script, tmp_path)
+        assert r.returncode == 3 and r.stdout.strip() == "small-body"
+
     def test_cd_persists_in_the_same_shell(self, tmp_path):
         (tmp_path / "sub").mkdir()
         script, _ = self._wrapped("cd sub", tmp_path)
