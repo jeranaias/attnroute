@@ -64,7 +64,14 @@ ACT_ENV = "ATTNROUTE_CAP_ACT"
 LOG_NAME = "output_cap.jsonl"
 
 #: Per-command holdout: this share of commands is never capped, so the arms compare.
+#:
+#: The steady-state default. For a TRIAL it is the wrong number: the measured decision rate is
+#: 2.9 Bash results over the cap per window, so a 10% control arm needs about 171 windows to
+#: reach 50 control decisions. The environment override lets a trial run at 50% and drop back.
 HOLDOUT_PCT = 10
+
+#: Override, read per decision so a change takes effect without a restart.
+HOLDOUT_ENV = "ATTNROUTE_CAP_HOLDOUT_PCT"
 
 
 def acting() -> bool:
@@ -76,6 +83,32 @@ def outputs_dir() -> Path:
     return Path.home() / ".claude" / "telemetry" / "outputs"
 
 
+def holdout_pct(env_name: str, default: int) -> tuple:
+    """A holdout percentage from the environment. -> (pct, why)
+
+    WARNING: A BAD VALUE DOES NOT SILENTLY BECOME THE DEFAULT. `why` is non-empty whenever
+    the environment said something that could not be used, and the caller puts it in the
+    telemetry record. A trial that ran at 10% because of a typo, while everyone believed it
+    ran at 50%, would produce a control arm five times smaller than the analysis assumes --
+    and nothing would look wrong.
+
+    0 and 100 are both allowed: 0 turns the holdout off (no control arm, so no contrast),
+    and 100 holds everything out (the lever observes but never acts, which is a useful way
+    to measure the decision rate without changing anything).
+    """
+    raw = os.environ.get(env_name)
+    if raw is None or not str(raw).strip():
+        return default, ""
+    text = str(raw).strip().rstrip("%")
+    try:
+        value = int(text)
+    except ValueError:
+        return default, f"{env_name}={raw!r} is not a whole number; using {default}"
+    if not 0 <= value <= 100:
+        return default, f"{env_name}={raw!r} is not a percentage; using {default}"
+    return value, ""
+
+
 def _bucket(*parts) -> int:
     """A stable 0-99 bucket; `hash()` is randomised per process and would not replay."""
     h = hashlib.sha256("\x1f".join(str(p) for p in parts).encode("utf-8")).hexdigest()
@@ -84,8 +117,14 @@ def _bucket(*parts) -> int:
 
 def arm_for(session_id: str, command: str, seed: str = "attnroute-v1") -> dict:
     """Which arm is this command in? Deterministic and logged, so the split can be re-derived."""
+    pct, why = holdout_pct(HOLDOUT_ENV, HOLDOUT_PCT)
     b = _bucket(seed, session_id, "cap", command)
-    return {"arm": "held-out" if b < HOLDOUT_PCT else "cap", "bucket": b, "seed": seed}
+    # The allocation travels with the decision; see the ledger for why.
+    out = {"arm": "held-out" if b < pct else "cap", "bucket": b, "seed": seed,
+           "holdout_pct": pct}
+    if why:
+        out["holdout_env_ignored"] = why
+    return out
 
 
 def eligible(tool_name: str, tool_input) -> tuple:
