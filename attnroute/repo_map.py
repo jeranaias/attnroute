@@ -20,6 +20,7 @@ Usage:
     context = mapper.get_map(query="fix the auth bug", token_budget=1000)
 """
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -160,6 +161,26 @@ class RepoMapper:
         self.dependency_graph = _nx().DiGraph() if NETWORKX_AVAILABLE else None
         self._indexed = False
 
+    #: Directories never worth descending into. Pruned BEFORE the walk enters them.
+    SKIP_DIRS = frozenset({
+        'node_modules', '.git', '__pycache__', 'venv', '.venv', '.env', 'dist', 'build',
+        '.next', 'target', '.mypy_cache', '.pytest_cache', '.ruff_cache', '.tox',
+        'eggs', '.eggs', 'site-packages',
+    })
+
+    def _walk_source_files(self):
+        """Yield (path, language) for every source file, in ONE pruned pass.
+
+        The extension becomes a dict lookup, so a new language costs nothing. It used to
+        cost a full recursive walk of the repository.
+        """
+        for dirpath, dirnames, filenames in os.walk(self.repo_path):
+            dirnames[:] = [d for d in dirnames if d not in self.SKIP_DIRS]
+            for name in filenames:
+                lang = LANGUAGE_MAP.get(os.path.splitext(name)[1])
+                if lang is not None:
+                    yield Path(dirpath) / name, lang
+
     def index(self, verbose: bool = False) -> None:
         """Index all source files in the repository."""
         if verbose:
@@ -167,32 +188,37 @@ class RepoMapper:
 
         files_indexed = 0
 
-        for ext, lang in LANGUAGE_MAP.items():
-            for filepath in self.repo_path.rglob(f"*{ext}"):
-                # Skip common non-source directories
-                path_str = str(filepath)
-                if any(skip in path_str for skip in [
-                    'node_modules', '.git', '__pycache__', 'venv',
-                    '.env', 'dist', 'build', '.next', 'target'
-                ]):
-                    continue
+        # ═══ ONE WALK, PRUNED AS IT GOES ═══════════════════════════════════════════════
+        #
+        # WARNING: THIS USED TO BE FOURTEEN FULL RECURSIVE WALKS -- one `rglob(f"*{ext}")`
+        #   per entry in LANGUAGE_MAP -- and the skip list was applied to the RESULT, so
+        #   `node_modules`, `.git` and `target` were descended into fourteen times and
+        #   discarded fourteen times. Measured from the UserPromptSubmit hook: 10,908
+        #   `os.scandir` calls from this one method, 3.1 s of a 9 s event.
+        #
+        #   `os.walk` with `dirnames[:]` assignment prunes BEFORE descending, which is the
+        #   point: a skipped directory is never read at all.
+        #
+        # WARNING: `max_files` ALSO MEANT SOMETHING DIFFERENT FROM WHAT IT SAID. The old
+        #   `break` left the OUTER loop running, so the cap applied per extension and the
+        #   real ceiling was up to fourteen times the stated one. It now stops the walk.
+        for filepath, lang in self._walk_source_files():
+            if files_indexed >= self.max_files:
+                break
 
-                if files_indexed >= self.max_files:
-                    break
+            try:
+                symbols = self._parse_file(filepath, lang)
+                if symbols:
+                    rel_path = str(filepath.relative_to(self.repo_path))
+                    self.file_symbols[rel_path] = symbols
+                    files_indexed += 1
 
-                try:
-                    symbols = self._parse_file(filepath, lang)
-                    if symbols:
-                        rel_path = str(filepath.relative_to(self.repo_path))
-                        self.file_symbols[rel_path] = symbols
-                        files_indexed += 1
-
-                        # Add to dependency graph
-                        if self.dependency_graph is not None:
-                            self.dependency_graph.add_node(rel_path)
-                except Exception as e:
-                    if verbose:
-                        print(f"  Error parsing {filepath}: {e}")
+                    # Add to dependency graph
+                    if self.dependency_graph is not None:
+                        self.dependency_graph.add_node(rel_path)
+            except Exception as e:
+                if verbose:
+                    print(f"  Error parsing {filepath}: {e}")
 
         # Build dependency edges
         self._build_dependencies()

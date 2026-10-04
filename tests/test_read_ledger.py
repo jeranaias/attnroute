@@ -290,7 +290,11 @@ class TestActingActuallyPreventsTheRead:
         ledger.record(str(big), tokens=2000)
         text = rl.format_notice(str(big), ledger.decide(str(big)))
         assert "to the command" not in text
-        assert "RE-ISSUE THE SAME READ" in text
+        assert "RE-ISSUE THE IDENTICAL READ" in text
+        # And it must disown the user attribution: Claude Code tells the model that a
+        # denied call means the USER declined, and "adjust, don't retry verbatim" is the
+        # opposite of the escape hatch this notice depends on.
+        assert text.startswith("NOT A USER DENIAL")
 
 
 class TestObservingFollowsTheSameTrajectoryAsActing:

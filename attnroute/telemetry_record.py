@@ -530,6 +530,16 @@ def maybe_run_optimizer(force: bool = False):
 
 
 def main():
+    # WARNING: A HOOK MAKES NO NETWORK CALL, EVER. Profiling this path found 2.32 s in
+    #   `load_verify_locations` and `huggingface_hub`/`model2vec`/`httpcore`/`ssl` all
+    #   loaded: the search index builds a model2vec model, which reaches out to Hugging
+    #   Face. That is egress from the user's machine on every prompt, it is most of the
+    #   remaining latency, and it is a hang waiting for a bad network in front of the
+    #   user's prompt. `lock_down` sets the offline variables and refuses non-local
+    #   connects. It is called HERE rather than at module import because this module is
+    #   also importable as a library, and a library has no business patching sockets.
+    from attnroute.no_egress import lock_down
+    lock_down()
     ensure_telemetry_dir()
     hook_input = parse_stdin()
 

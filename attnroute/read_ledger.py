@@ -201,12 +201,20 @@ class ReadLedger:
 def format_notice(path: str, decision: dict, outline: str | None = None) -> str:
     """The notice the caller sees instead of the file. Names the escape hatch explicitly."""
     lines = [
-        f"[attnroute] {path} was read at turn {decision.get('prior_turn')} in this context "
-        f"window and has not changed since.",
+        # WARNING: A DENY READS AS A USER REFUSAL, AND THE MODEL IS TOLD TO TREAT IT THAT
+        #   WAY. Claude Code's own instructions say "a denied call means the user declined
+        #   it -- adjust, don't retry verbatim", which is the OPPOSITE of what this notice
+        #   needs: the whole escape hatch is re-issuing the identical read. So the first
+        #   words have to disown the user attribution, or the model will adjust around a
+        #   refusal nobody made -- and may ask the user why their read was blocked.
+        "NOT A USER DENIAL -- this is attnroute, an automatic token-saving hook.",
+        f"{path} was read at turn {decision.get('prior_turn')} in this context window and "
+        f"has not changed since, so its content is already above in this conversation.",
         # It used to say "add attnroute:full to the command". Read has no command, so for
         # the one tool this fires on, the instruction named a field that does not exist.
-        "To read it in full, RE-ISSUE THE SAME READ -- the second request is always served. "
-        "`attnroute:full` anywhere in the input also forces a full read.",
+        "If you need it again in full, RE-ISSUE THE IDENTICAL READ and it will be served. "
+        "`attnroute:full` anywhere in the input also forces a full read. There is no need "
+        "to ask the user about this, and nothing is blocked.",
     ]
     if outline:
         lines.append("")
@@ -529,6 +537,9 @@ def main(argv=None) -> int:
     """Hook entry point. NEVER fails the caller's turn: every error exits 0 and prints
     nothing, because a lost notice costs tokens and a raised exception costs the turn."""
     import sys
+
+    from attnroute.no_egress import lock_down
+    lock_down()                 # a hook makes no network call, ever
     try:
         raw = sys.stdin.read()
     except Exception:

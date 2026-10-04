@@ -276,6 +276,54 @@ def _coact_graph():
 _docs_root_cache: Path | None = None
 _docs_root_checked: bool = False
 
+#: Directories under a `.claude` root that are machine-generated and cannot hold corpus
+#: docs. `projects/` alone holds the transcripts -- three of them were 322, 299 and 269 MB
+#: when this was written -- and walking it to answer "are there any .md files here?" cost
+#: 10,736 `scandir` calls and 5.7 s of the UserPromptSubmit hook.
+#:
+#: Deliberately NOT pruned: skills, memory, memory-archive, plugins, backups. Those can
+#: legitimately hold markdown a user wrote, and pruning them could change which root is
+#: chosen -- a speed-up that quietly alters the answer is not a speed-up.
+CORPUS_PRUNE_DIRS = frozenset({
+    "projects", "file-history", "shell-snapshots", "paste-cache", "cache", "caches",
+    "downloads", "todos", "statsig", "telemetry", "sessions", "session-env", "debug",
+    "ide", "daemon", "jobs", "tasks", ".git", "node_modules", "__pycache__", "venv",
+    ".venv", "site-packages",
+})
+
+#: Stop after this many directories even so. A bound that is never reached still has to
+#: exist, because the cost of being wrong here is paid in front of the user's prompt.
+CORPUS_WALK_DIR_LIMIT = 4000
+
+
+def count_markdown(root: Path, cap: int = 200) -> tuple[int, bool]:
+    """How many .md files are under `root`? -> (count, capped)
+
+    WARNING: THE QUESTION IS "ARE THERE ANY", AND THE OLD CODE BUILT THE WHOLE LIST.
+      `list(root.glob("**/*.md"))` walked every directory under `~/.claude`, including the
+      transcript archive, to decide whether a corpus root had any markdown in it -- then
+      used the list for a log line and threw it away. A check that does unbounded work to
+      answer a bounded question is the same defect whether it is slow or wrong; here it was
+      slow, on every prompt.
+
+      This prunes the machine-generated directories, stops at `cap`, and reports whether it
+      stopped, so the caller never mistakes "200+" for "exactly 200".
+    """
+    count = 0
+    dirs_seen = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirs_seen += 1
+        if dirs_seen > CORPUS_WALK_DIR_LIMIT:
+            return count, True
+        dirnames[:] = [d for d in dirnames if d not in CORPUS_PRUNE_DIRS]
+        for name in filenames:
+            if name.endswith(".md"):
+                count += 1
+                if count >= cap:
+                    return count, True
+    return count, False
+
+
 def resolve_docs_root() -> Path:
     """
     Resolve documentation root with correct priority order.
@@ -312,10 +360,10 @@ def resolve_docs_root() -> Path:
         project_claude = Path.cwd() / ".claude"
         if project_claude.is_dir():
             # Check if it has any .md files (not just exists)
-            md_files = list(project_claude.glob("**/*.md"))
-            if md_files:
+            found, capped = count_markdown(project_claude)
+            if found:
                 print(f"[attnroute] Using project-local .claude: {project_claude}", file=sys.stderr)
-                print(f"  Found {len(md_files)} .md files", file=sys.stderr)
+                print(f"  Found {found}{'+' if capped else ''} .md files", file=sys.stderr)
                 result = project_claude
             else:
                 print(f"[attnroute] WARN:Project .claude/ exists but has no .md files: {project_claude}", file=sys.stderr)
@@ -324,10 +372,10 @@ def resolve_docs_root() -> Path:
     if result is None:
         global_claude = Path.home() / ".claude"
         if global_claude.is_dir():
-            md_files = list(global_claude.glob("**/*.md"))
-            if md_files:
+            found, capped = count_markdown(global_claude)
+            if found:
                 print(f"[attnroute] Using global ~/.claude: {global_claude}", file=sys.stderr)
-                print(f"  Found {len(md_files)} .md files", file=sys.stderr)
+                print(f"  Found {found}{'+' if capped else ''} .md files", file=sys.stderr)
                 result = global_claude
             else:
                 print("[attnroute] WARN:Global ~/.claude/ exists but has no .md files", file=sys.stderr)
@@ -883,12 +931,36 @@ def load_state(state_file: Path) -> dict:
     }
 
 
+def _json_safe(value) -> bool:
+    """Can this value be written to the state file?"""
+    try:
+        json.dumps(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def save_state(state_file: Path, state: dict) -> None:
     """Save attention state to file using atomic write with fallback."""
     from attnroute.compat import safe_atomic_write
     state["last_update"] = datetime.now().isoformat()
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(state, indent=2)
+    try:
+        content = json.dumps(state, indent=2)
+    except (TypeError, ValueError) as exc:
+        # WARNING: THIS USED TO BE AN UNCAUGHT RAISE AT THE END OF EVERY HOOK EVENT, and
+        #   because the hook's output had already been printed, nothing downstream noticed.
+        #   A `set` in the state (see the import graph above) crashed every turn, and the
+        #   only symptom was that attention state never changed. It now says which key is
+        #   at fault and saves what it can.
+        bad = sorted(k for k, v in state.items() if not _json_safe(v))
+        print(f"[attnroute] state NOT saved: {exc!r}; offending keys: {bad or 'unknown'}",
+              file=sys.stderr)
+        state = {k: v for k, v in state.items() if _json_safe(v)}
+        try:
+            content = json.dumps(state, indent=2)
+        except (TypeError, ValueError):
+            return
     if not safe_atomic_write(state_file, content):
         print(f"[attnroute] Warning: Failed to save state to {state_file}", file=sys.stderr)
 
@@ -1270,9 +1342,25 @@ def update_attention(state: dict, prompt: str) -> tuple[dict, set[str]]:
             for src, imports in import_graph.items():
                 for imp in imports:
                     reverse_graph.setdefault(imp, set()).add(src)
-            state["import_graph"] = import_graph
-            state["import_graph_reverse"] = {k: list(v) for k, v in reverse_graph.items()}
-        except Exception:
+            # WARNING: THE SETS MUST BECOME LISTS, AND THIS LINE IS WHY NOTHING WORKED.
+            #   `_build_import_graph` returns dict[str, set[str]]. The reverse graph below
+            #   was converted; this one was stored raw, so `json.dumps` in `save_state`
+            #   raised `TypeError: Object of type set is not JSON serializable` -- on EVERY
+            #   TURN, at the very end of the hook, after all the work was done.
+            #
+            #   Two consequences, both invisible:
+            #     * state was NEVER saved, so every score and every decay was discarded;
+            #     * `turn_count` stayed 0, which is the condition guarding this block, so
+            #       the import graph was rebuilt from a full filesystem walk every turn.
+            #
+            #   The crash and the repeated expensive walk were the same bug. Sorted rather
+            #   than list() so the saved state is stable and diffable.
+            state["import_graph"] = {k: sorted(v) for k, v in import_graph.items()}
+            state["import_graph_reverse"] = {k: sorted(v) for k, v in reverse_graph.items()}
+        except Exception as exc:
+            # Not swallowed: an exception here used to leave an empty graph and no trace,
+            # which is indistinguishable from a project that has no imports.
+            print(f"[attnroute] import graph unavailable: {exc!r}", file=sys.stderr)
             state["import_graph"] = {}
             state["import_graph_reverse"] = {}
             import_graph = {}
@@ -2170,6 +2258,16 @@ def main():
     Main entry point for Claude Code hook.
     Reads JSON from stdin, outputs tiered context to stdout.
     """
+    # WARNING: A HOOK MAKES NO NETWORK CALL, EVER. Profiling this path found 2.32 s in
+    #   `load_verify_locations` and `huggingface_hub`/`model2vec`/`httpcore`/`ssl` all
+    #   loaded: the search index builds a model2vec model, which reaches out to Hugging
+    #   Face. That is egress from the user's machine on every prompt, it is most of the
+    #   remaining latency, and it is a hang waiting for a bad network in front of the
+    #   user's prompt. `lock_down` sets the offline variables and refuses non-local
+    #   connects. It is called HERE rather than at module import because this module is
+    #   also importable as a library, and a library has no business patching sockets.
+    from attnroute.no_egress import lock_down
+    lock_down()
     global MAX_HOT_FILES, MAX_WARM_FILES, MAX_TOTAL_CHARS  # C1: Allow modification in notification clamping
 
     # Parse input - use safe_read_stdin to prevent memory exhaustion DoS
