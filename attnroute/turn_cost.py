@@ -117,6 +117,27 @@ def _describing_docs(read_path: str, relationships: dict) -> list:
     return out
 
 
+def _at_line_start(path: Path, offset: int) -> bool:
+    """Is `offset` the first byte of a line?
+
+    WARNING: WITHOUT THIS, EVERY SPAN DROPPED ITS FIRST ENTRY. A stored offset is the file
+    size after reading whole lines, so it is ALWAYS a line boundary -- and the old
+    unconditional `readline()` "to discard a partial line" therefore discarded a complete
+    one. The read ledger found it: a compaction marker written as the first line after the
+    stored offset was never seen, so the second witness for compaction caught nothing.
+
+    One byte is read to decide. Cheaper than being wrong.
+    """
+    if offset <= 0:
+        return True
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset - 1)
+            return fh.read(1) in (b'\n', b'\r')
+    except OSError:
+        return False
+
+
 def read_span(path: Path, start_offset) -> tuple:
     """(lines, new_offset, complete). The bytes appended since `start_offset`.
 
@@ -135,9 +156,11 @@ def read_span(path: Path, start_offset) -> tuple:
         start = size - MAX_SPAN_BYTES
         complete = False
     with open(path, encoding="utf-8", errors="replace") as fh:
-        fh.seek(start)
-        if start > 0:
-            fh.readline()      # discard a partial line
+        if start > 0 and not _at_line_start(path, start):
+            fh.seek(start)
+            fh.readline()      # discard the partial line this offset lands inside
+        else:
+            fh.seek(start)
         lines = fh.readlines()
     return lines, size, complete
 
