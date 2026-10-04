@@ -50,3 +50,34 @@ def trust_used_signal() -> bool:
     and so a long-lived hook process picks up a change without a restart.
     """
     return os.environ.get(ENV_VAR, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ═══ OBSERVE-ONLY ══════════════════════════════════════════════════════════════════════════
+#
+# ⚠ WHY THIS EXISTS, AND IT IS A HONESTY FIX RATHER THAN A FEATURE. "Recording-only" was
+#   described to the owner as "changes no behaviour; it just starts collecting numbers", and
+#   that was NOT TRUE of the package's default state: the router still injected. On eight
+#   long-running sessions that is new context in every prompt, unmeasured.
+#
+# In OBSERVE-ONLY the router does everything except emit: it scores, selects, builds the
+# injection and LOGS what it would have sent, then writes nothing to stdout. Two consequences
+# worth stating:
+#
+#   * It is an honest BASELINE ARM -- a session in this mode is 100% held out, so it measures
+#     what a turn costs with no routing at all, which is the denominator the whole exercise
+#     needs and which no amount of per-file holdout can produce.
+#   * The turn record stays comparable with an injecting session, because the same fields are
+#     written from the same computation. `injection_emitted` is what distinguishes them, and an
+#     analysis that ignores it would count suppressed context as delivered.
+#
+# Turning injection ON is a separate, explicit step. Nothing in the package sets this.
+OBSERVE_ONLY_ENV = "ATTNROUTE_OBSERVE_ONLY"
+
+
+def observe_only() -> bool:
+    """Compute and log the injection, but emit nothing?
+
+    Read per call, like `trust_used_signal`, so a long-lived hook picks up a change and a test
+    can set it without reloading the module.
+    """
+    return os.environ.get(OBSERVE_ONLY_ENV, "").strip().lower() in ("1", "true", "yes", "on")

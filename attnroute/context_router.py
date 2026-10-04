@@ -22,6 +22,8 @@ Input: JSON from stdin {"prompt": "..."}
 Output: Tiered context to stdout
 """
 
+from attnroute.used_signal import observe_only
+
 import copy
 import io
 import json
@@ -1867,7 +1869,9 @@ def measure_pool_size() -> int:
 
 
 def record_turn_telemetry(prompt: str, was_notification: bool, stats: dict,
-                          activated: set, state: dict, injection_chars: int):
+                          activated: set, state: dict, injection_chars: int,
+                          injection_emitted: bool = True,
+                          observe_only_mode: bool = False):
     """Record turn data to telemetry/turns.jsonl for analysis."""
     try:
         telemetry_dir = Path.home() / ".claude" / "telemetry"
@@ -1906,6 +1910,12 @@ def record_turn_telemetry(prompt: str, was_notification: bool, stats: dict,
             "hot_count": stats.get("hot", 0),
             "warm_count": stats.get("warm", 0),
             "files_injected": hot_files[:MAX_HOT_FILES] + warm_files[:MAX_WARM_FILES],
+            # ⚠ WHETHER THE INJECTION ACTUALLY LANDED. Every field above describes what
+            #   was COMPUTED, so the record stays comparable across arms; this is what
+            #   tells an analysis whether it was DELIVERED. An analysis that ignored it
+            #   would count suppressed context as delivered.
+            "injection_emitted": injection_emitted,
+            "observe_only": observe_only_mode,
             "files_used": [],  # Populated later by telemetry-record.py Stop hook
             "waste_ratio": -1,  # Populated later
             "tool_calls": 0,  # Populated later
@@ -1914,6 +1924,33 @@ def record_turn_telemetry(prompt: str, was_notification: bool, stats: dict,
             f.write(json.dumps(record) + "\n")
     except Exception:
         pass  # Never fail the hook
+
+
+def emit_injection(output: str, stats: dict, observe_only_mode: bool) -> bool:
+    """Write the injection to stdout, or suppress it. -> whether it was emitted.
+
+    ⚠ OBSERVE-ONLY SUPPRESSES THE EMISSION AND NOTHING ELSE. Everything that produces
+      `output` -- scoring, selection, tiering -- has already run by the time this is called, so
+      the turn record remains a true statement of what WOULD have been sent. A session in this
+      mode is an honest 100% held-out baseline arm, not a session with the router switched off.
+
+    ⚠ AND THE NOTICE GOES TO stderr. stdout IS THE INJECTION CHANNEL: a notice printed there
+      would itself become context, which is the one thing this mode exists to prevent.
+
+    This is a named function rather than a branch inside `main()` because the branch could only
+    be exercised by running the whole hook in a subprocess -- measured at about 50 s per
+    invocation, and still dependent on a corpus fixture that scores HOT. The decision is worth
+    a seam.
+    """
+    if not (stats.get("hot", 0) > 0 or stats.get("warm", 0) > 0):
+        return False
+    if observe_only_mode:
+        print(f"[attnroute] OBSERVE-ONLY: {stats.get('hot', 0)} hot + "
+              f"{stats.get('warm', 0)} warm ({len(output)} chars) computed and logged, "
+              f"NOT injected", file=sys.stderr)
+        return False
+    print(output)
+    return True
 
 
 def main():
@@ -2042,11 +2079,12 @@ def main():
             pass
 
     # Output to Claude Code
-    if stats["hot"] > 0 or stats["warm"] > 0:
-        print(output)
+    _observe_only = observe_only()
+    _emitted = emit_injection(output, stats, _observe_only)
 
     # === TELEMETRY: Record turn data ===
-    record_turn_telemetry(prompt, was_notification, stats, activated, state, len(output))
+    record_turn_telemetry(prompt, was_notification, stats, activated, state, len(output),
+                          injection_emitted=_emitted, observe_only_mode=_observe_only)
     # Note: Usage tracking (log_injection, track_turn_usage) moved to telemetry_record.py Stop hook
 
 
