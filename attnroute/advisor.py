@@ -14,6 +14,8 @@ Storage: learned_state.json["suggestions"]
 CLI: attnroute-suggest (list / --apply N / --dismiss N)
 """
 
+from attnroute.used_signal import trust_used_signal
+
 import json
 import sys
 from collections import Counter
@@ -195,7 +197,15 @@ class ClaudeMdAdvisor:
         return suggestions
 
     def _find_high_waste(self, turns: list[dict]) -> list[dict]:
-        """Find files with high waste ratio over multiple turns."""
+        """Find files with high waste ratio over multiple turns.
+
+        ⚠ RETURNS NOTHING UNLESS THE USED SIGNAL IS TRUSTED. This recommended removing the
+          files whose injection had WORKED: `used` needs a tool call on the subject, and a
+          working injection is what removes that tool call. See attnroute/used_signal.py.
+        """
+        if not trust_used_signal():
+            return []
+
         file_stats = {}  # file -> {injected: n, used: n}
 
         for turn in turns:
