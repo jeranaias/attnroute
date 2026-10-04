@@ -10,6 +10,7 @@ tell it is wrong.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -241,3 +242,60 @@ class TestTheHandbackUsesTheDerivedTeam:
         why = ss.load("s").get("facts", {}).get("team_unknown")
         assert why, "an unknown team must be said out loud, not left as an absent row"
         tm._CACHE.clear()
+
+
+class TestBothSidesAreResolvedTheSameWay:
+    """⚠ THE macOS RED, and it was an asymmetry rather than a platform quirk.
+
+    `load_map` normalised each prefix while `team_for` RESOLVED the session path. On Linux
+    and Windows the two agree for ordinary paths, so it looked correct. On macOS `/home` is
+    a firmlink, so the session path resolved elsewhere, the mapping key stayed literal, and
+    every match returned None.
+
+    Off CI the same asymmetry bites on a symlinked worktree, which is what these tests use:
+    a real symlink, both spellings, in both directions.
+    """
+
+    @pytest.fixture
+    def linked(self, tmp_path):
+        """A real directory and a symlink pointing at it, or skip."""
+        real = tmp_path / "real-worktrees" / "meridian-t5"
+        real.mkdir(parents=True)
+        link = tmp_path / "t5-link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlinks unavailable here: {exc!r}")
+        return real, link
+
+    def test_a_mapping_on_the_link_matches_a_session_in_the_real_path(self, mapping, linked):
+        real, link = linked
+        p = mapping({str(link): "T5"})
+        assert tm.team_for(str(real), env={}, map_file=p)["team"] == "T5"
+
+    def test_a_mapping_on_the_real_path_matches_a_session_in_the_link(self, mapping, linked):
+        real, link = linked
+        p = mapping({str(real): "T5"})
+        assert tm.team_for(str(link), env={}, map_file=p)["team"] == "T5"
+
+    def test_a_subdirectory_under_either_spelling_matches(self, mapping, linked):
+        real, link = linked
+        (real / "nav").mkdir()
+        p = mapping({str(link): "T5"})
+        assert tm.team_for(str(real / "nav"), env={}, map_file=p)["team"] == "T5"
+        assert tm.team_for(str(link / "nav"), env={}, map_file=p)["team"] == "T5"
+
+    def test_an_unrelated_sibling_still_does_not_match(self, mapping, linked):
+        """Positive control: resolving both sides must not turn everything into a match."""
+        real, link = linked
+        other = real.parent / "meridian-t6"
+        other.mkdir()
+        p = mapping({str(link): "T5"})
+        assert tm.team_for(str(other), env={}, map_file=p)["team"] is None
+
+    def test_the_prefix_and_the_path_go_through_one_function(self):
+        """Blunt, and it is here because the bug was invisible on two of three platforms:
+        the mapping key must be built by the same resolver the session path uses."""
+        src = Path(tm.__file__).read_text(encoding="utf-8")
+        assert "key = _resolve(prefix)" in src
+        assert "key = _normalise(prefix)" not in src

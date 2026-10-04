@@ -30,6 +30,12 @@ it does not cover a path the answer is "unknown", which is visible.
    components, so a prefix matches only at a directory boundary.
 2. LONGEST PREFIX WINS. Otherwise the answer depends on dictionary order, and a specific
    worktree inside a mapped parent would resolve to the parent.
+2a. BOTH SIDES GO THROUGH THE SAME FUNCTION. The session path is resolved, so the mapping
+   prefixes are resolved as well. Comparing a resolved path against a literal spelling is
+   comparing two different things, and it only looks correct where the two happen to agree:
+   on macOS `/home` is a firmlink, so every match returned None while Linux and Windows
+   stayed green. Off CI it is the symlinked worktree that bites -- the mapping names one
+   spelling and the session reports the other.
 3. A COLLIDING MAPPING IS REPORTED, NOT RESOLVED, and the collision is not where I first
    looked for it. Since comparison is case-insensitive and separator-insensitive, two
    DIFFERENTLY SPELLED keys can mean the same directory -- `C:/a` and `C:\\A` -- and a plain
@@ -54,42 +60,6 @@ MAP_NAME = "attnroute-teams.json"
 
 def map_path() -> Path:
     return Path.home() / ".claude" / MAP_NAME
-
-
-def load_map(path=None) -> tuple:
-    """-> ({normalised prefix: team}, why)
-
-    `why` is non-empty when the file exists but could not be used. An absent file is not a
-    problem and says nothing.
-    """
-    p = Path(path) if path else map_path()
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}, ""
-    except (OSError, ValueError) as exc:
-        return {}, f"{p} could not be read: {exc!r}"
-    if not isinstance(raw, dict):
-        return {}, f"{p} is not an object of path -> team"
-    out = {}
-    spelling = {}
-    clashes = []
-    for prefix, team in raw.items():
-        if not isinstance(prefix, str) or not isinstance(team, str) or not team.strip():
-            continue
-        key = _normalise(prefix)
-        team = team.strip()
-        if key in out and out[key] != team:
-            # Two spellings of one directory naming two teams. Reported, because a dict
-            # would simply keep the last one and nothing would look wrong.
-            clashes.append(f"{spelling[key]!r} and {prefix!r} both mean the same directory "
-                           f"but name {out[key]} and {team}")
-            continue
-        out[key] = team
-        spelling[key] = prefix
-    if clashes:
-        return {}, f"{p} is ambiguous: " + "; ".join(clashes)
-    return out, ""
 
 
 def _normalise(path) -> tuple:
@@ -126,6 +96,49 @@ def _resolve(path) -> tuple:
     except (OSError, ValueError, RuntimeError, TypeError):
         pass
     return _normalise(path)
+
+
+def load_map(path=None) -> tuple:
+    """-> ({normalised prefix: team}, why)
+
+    `why` is non-empty when the file exists but could not be used. An absent file is not a
+    problem and says nothing.
+    """
+    p = Path(path) if path else map_path()
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, ""
+    except (OSError, ValueError) as exc:
+        return {}, f"{p} could not be read: {exc!r}"
+    if not isinstance(raw, dict):
+        return {}, f"{p} is not an object of path -> team"
+    out = {}
+    spelling = {}
+    clashes = []
+    for prefix, team in raw.items():
+        if not isinstance(prefix, str) or not isinstance(team, str) or not team.strip():
+            continue
+        # ⚠ _resolve, NOT _normalise. THE SESSION PATH IS RESOLVED, SO THE PREFIX MUST BE
+        #   TOO. Comparing a resolved path against an unresolved spelling is comparing two
+        #   different things and getting away with it only where they happen to agree. On
+        #   macOS `/home` is a firmlink, so a session in /home/jesse/meridian-t5 resolves
+        #   elsewhere while the mapping key stayed literal -- every match returned None. It
+        #   also fixes the case that matters off CI: a worktree reached through a symlink,
+        #   where the mapping names one spelling and the session reports the other.
+        key = _resolve(prefix)
+        team = team.strip()
+        if key in out and out[key] != team:
+            # Two spellings of one directory naming two teams. Reported, because a dict
+            # would simply keep the last one and nothing would look wrong.
+            clashes.append(f"{spelling[key]!r} and {prefix!r} both mean the same directory "
+                           f"but name {out[key]} and {team}")
+            continue
+        out[key] = team
+        spelling[key] = prefix
+    if clashes:
+        return {}, f"{p} is ambiguous: " + "; ".join(clashes)
+    return out, ""
 
 
 def team_for(cwd=None, env=None, map_file=None) -> dict:
