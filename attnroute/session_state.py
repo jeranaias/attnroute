@@ -185,6 +185,80 @@ def add_note(state: dict, text: str, kind: str = "note", promoted_to: str | None
     return note
 
 
+def find_note(state: dict, wanted: str) -> dict:
+    """One note by id or unambiguous id prefix. -> {"note", "why"}
+
+    A prefix is accepted because the ids carry a unix timestamp -- `n4-1791113536` is not
+    something anyone retypes correctly. An AMBIGUOUS prefix is refused rather than resolved
+    to the first match: deleting or rewriting the wrong ruling is a worse outcome than
+    being asked for another character.
+    """
+    wanted = str(wanted or "").strip()
+    if not wanted:
+        return {"note": None, "why": "no note id given"}
+    notes = state.get("notes") or []
+    exact = [n for n in notes if n.get("id") == wanted]
+    if exact:
+        return {"note": exact[0], "why": ""}
+    matches = [n for n in notes if str(n.get("id", "")).startswith(wanted)]
+    if not matches:
+        return {"note": None, "why": f"no note with id {wanted!r}"}
+    if len(matches) > 1:
+        return {"note": None,
+                "why": (f"{wanted!r} matches {len(matches)} notes: "
+                        + ", ".join(n["id"] for n in matches[:5]))}
+    return {"note": matches[0], "why": ""}
+
+
+def remove_note(state: dict, wanted: str) -> dict:
+    """Delete a note outright. -> {"removed", "why"}
+
+    A real delete, not a tombstone: a note recorded by mistake -- a typo, the wrong
+    `--promoted-to`, a duplicate -- is noise, and keeping noise for the sake of history
+    just spends the handback budget on it. Amend is the operation that preserves history.
+    """
+    found = find_note(state, wanted)
+    if not found["note"]:
+        return {"removed": None, "why": found["why"]}
+    note = found["note"]
+    state["notes"] = [n for n in (state.get("notes") or []) if n is not note]
+    # Its id may already be in `handed_back`; harmless, but leaving it there would keep a
+    # deleted note's id in the file forever.
+    state["handed_back"] = [i for i in (state.get("handed_back") or [])
+                            if i != note.get("id")]
+    return {"removed": note, "why": ""}
+
+
+def amend_note(state: dict, wanted: str, text: str, kind: str | None = None,
+               promoted_to: str | None = None) -> dict:
+    """Replace a note with a corrected one. -> {"note", "superseded", "why"}
+
+    WARNING: SUPERSEDES RATHER THAN EDITS IN PLACE. A state file that silently rewrites
+    what a session decided is a state file nobody can audit -- the record would say the
+    ruling had always read this way. So the original stays, carrying `superseded_by`, and
+    the replacement carries `supersedes`.
+
+    A superseded note is NOT handed back: the next window needs the current ruling, not its
+    drafts, and the handback budget is 1,500 tokens. It is still in the file, and
+    `state show` lists it.
+    """
+    found = find_note(state, wanted)
+    if not found["note"]:
+        return {"note": None, "superseded": None, "why": found["why"]}
+    old = found["note"]
+    if old.get("superseded_by"):
+        return {"note": None, "superseded": None,
+                "why": (f"{old['id']} was already superseded by {old['superseded_by']}; "
+                        f"amend that one instead")}
+    new = add_note(state, text, kind=kind or old.get("kind", "note"),
+                   promoted_to=promoted_to if promoted_to is not None
+                   else old.get("promoted_to"),
+                   source=old.get("source"))
+    new["supersedes"] = old["id"]
+    old["superseded_by"] = new["id"]
+    return {"note": new, "superseded": old, "why": ""}
+
+
 def check_promotion(note: dict, repo: Path | str = ".") -> dict:
     """Is this note where it claims to be? -> {"state", "why"}
 
@@ -325,6 +399,10 @@ def _note_lines(state: dict, repo) -> list:
     handed = set(state.get("handed_back") or [])
     out = []
     for note in state.get("notes") or []:
+        if note.get("superseded_by"):
+            # The next window needs the current ruling, not its drafts. The original stays
+            # in the file for audit; `state show` lists it.
+            continue
         age = _age_hours(note.get("at", ""))
         if age is not None and age > NOTE_MAX_AGE_HOURS:
             continue
