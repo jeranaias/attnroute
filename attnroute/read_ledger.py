@@ -303,13 +303,49 @@ ACT_ENV = "ATTNROUTE_LEDGER_ACT"
 
 #: Per-file holdout: this share of keys NEVER get a notice, so the two arms can be compared
 #: within one session. Whole-turn holdout: this share of turns is left entirely alone.
+#:
+#: These are the STEADY-STATE defaults. 10% is right once a lever is established and wrong for
+#: a trial: equal allocation maximises power, and the measured decision rate for this lever is
+#: 1.9 repeat Reads per window, so a 10% control arm takes about 257 windows to reach 50
+#: control decisions. Hence the environment overrides below -- a trial runs at 50% without a
+#: code fork, and drops back afterwards.
 HOLDOUT_FILE_PCT = 10
 HOLDOUT_TURN_PCT = 3
+
+#: Overrides, read per decision so a change takes effect without a restart.
+FILE_HOLDOUT_ENV = "ATTNROUTE_LEDGER_HOLDOUT_PCT"
+TURN_HOLDOUT_ENV = "ATTNROUTE_LEDGER_TURN_HOLDOUT_PCT"
 
 
 def acting() -> bool:
     """May the ledger change a read, or only log what it would have done?"""
     return os.environ.get(ACT_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def holdout_pct(env_name: str, default: int) -> tuple:
+    """A holdout percentage from the environment. -> (pct, why)
+
+    WARNING: A BAD VALUE DOES NOT SILENTLY BECOME THE DEFAULT. `why` is non-empty whenever
+    the environment said something that could not be used, and the caller puts it in the
+    telemetry record. A trial that ran at 10% because of a typo, while everyone believed it
+    ran at 50%, would produce a control arm five times smaller than the analysis assumes --
+    and nothing would look wrong.
+
+    0 and 100 are both allowed: 0 turns the holdout off (no control arm, so no contrast),
+    and 100 holds everything out (the lever observes but never acts, which is a useful way
+    to measure the decision rate without changing anything).
+    """
+    raw = os.environ.get(env_name)
+    if raw is None or not str(raw).strip():
+        return default, ""
+    text = str(raw).strip().rstrip("%")
+    try:
+        value = int(text)
+    except ValueError:
+        return default, f"{env_name}={raw!r} is not a whole number; using {default}"
+    if not 0 <= value <= 100:
+        return default, f"{env_name}={raw!r} is not a percentage; using {default}"
+    return value, ""
 
 
 def _bucket(*parts) -> int:
@@ -327,15 +363,26 @@ def holdout(session_id: str, key: str, turn, seed: str = "attnroute-v1") -> dict
       decision, so the split can be re-derived from the data rather than trusted -- and so an
       analysis cannot pick its arms after the fact.
     """
+    file_pct, file_why = holdout_pct(FILE_HOLDOUT_ENV, HOLDOUT_FILE_PCT)
+    turn_pct, turn_why = holdout_pct(TURN_HOLDOUT_ENV, HOLDOUT_TURN_PCT)
     fb = _bucket(seed, session_id, key)
     tb = _bucket(seed, session_id, "turn", turn)
-    if tb < HOLDOUT_TURN_PCT:
+    if tb < turn_pct:
         arm = "held-out-turn"
-    elif fb < HOLDOUT_FILE_PCT:
+    elif fb < file_pct:
         arm = "held-out-file"
     else:
         arm = "ledger"
-    return {"arm": arm, "file_bucket": fb, "turn_bucket": tb, "seed": seed}
+    # ⚠ THE ALLOCATION IS LOGGED WITH EVERY DECISION. An arm without the percentage it was
+    #   drawn at is not a measurement: an analysis spanning a 10% period and a 50% period
+    #   has to be able to tell them apart, and "the trial ran at 50%" is a claim somebody
+    #   remembers rather than something the data says.
+    out = {"arm": arm, "file_bucket": fb, "turn_bucket": tb, "seed": seed,
+           "file_holdout_pct": file_pct, "turn_holdout_pct": turn_pct}
+    why = "; ".join(w for w in (file_why, turn_why) if w)
+    if why:
+        out["holdout_env_ignored"] = why
+    return out
 
 
 def hook_decision(ledger: "ReadLedger", session_id: str, tool_name: str, tool_input: dict,
