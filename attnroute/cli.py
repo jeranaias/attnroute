@@ -432,9 +432,22 @@ def cmd_validate(args):
 
 def cmd_note(args):
     """Record something this session decided, so compaction cannot lose it."""
-    from attnroute.session_state import KINDS, add_note, check_promotion, load, save
+    from attnroute.session_state import (
+        KINDS,
+        add_note,
+        check_promotion,
+        load,
+        save,
+        session_from_env,
+    )
 
-    session = args.session or os.environ.get("CLAUDE_SESSION_ID", "") or "local"
+    session = args.session
+    if not session:
+        found = session_from_env()
+        if not found["session"]:
+            print(f"[attnroute] {found['why']}", file=sys.stderr)
+            return 1
+        session = found["session"]
     state = load(session)
     if args.kind not in KINDS:
         print(f"[attnroute] kind must be one of: {', '.join(KINDS)}", file=sys.stderr)
@@ -466,9 +479,16 @@ def cmd_state(args):
         check_promotion,
         handback,
         load,
+        session_from_env,
     )
 
-    session = args.session or os.environ.get("CLAUDE_SESSION_ID", "") or "local"
+    session = args.session
+    if not session:
+        found = session_from_env()
+        if not found["session"]:
+            print(f"[attnroute] {found['why']}", file=sys.stderr)
+            return 1
+        session = found["session"]
     state = load(session)
     repo = args.repo or "."
 

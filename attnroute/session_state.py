@@ -82,6 +82,47 @@ def estimate_tokens(text: str) -> int:
         return max(0, len(text or "") // 4)
 
 
+#: The variable the CLI actually exports into a tool's environment. VERIFIED, not assumed:
+#: in a Bash tool call under 2.1.280, `CLAUDE_SESSION_ID` is unset and
+#: `CLAUDE_CODE_SESSION_ID` holds the id. The shorter name survives only as a fallback,
+#: because it appears in the binary as a template placeholder and may be a documented alias
+#: somewhere this was not tested.
+SESSION_ENV = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")
+
+
+def session_from_env(env=None) -> dict:
+    """Which session is this? -> {"session", "var", "why"}; `session` is None when unknown.
+
+    WARNING: THERE IS NO DEFAULT, AND THAT IS THE POINT. An earlier version fell back to a
+    session literally named "local" when the variable was missing -- which is exactly what
+    happened, because it was reading the wrong variable name. Notes went to "local", the
+    handback read the real session id, and the two never met. Nothing failed; the lever
+    simply did nothing, which is the worst way for a measurement tool to be broken.
+
+    A caller that cannot name its session is REFUSED. A refusal is visible; a wrong default
+    is not.
+
+    SUBAGENTS, deliberately: if a subagent's Bash carries the PARENT's id, its notes land on
+    the parent's key -- and that is wanted here, unlike in the read ledger. The ledger is
+    about what is in a context window, so a subagent's reads must not affect the parent's.
+    A RULING is about the work, and the parent is who carries the work on. A ruling made
+    inside a subagent that vanished with the subagent would be the bug, not the feature.
+    """
+    import os as _os
+
+    env = env if env is not None else _os.environ
+    for name in SESSION_ENV:
+        value = str(env.get(name) or "").strip()
+        if value:
+            return {"session": value, "var": name, "why": ""}
+    return {"session": None, "var": None,
+            "why": ("no session id in the environment: looked for "
+                    + " and ".join(SESSION_ENV)
+                    + ". Pass --session explicitly. (Refusing rather than defaulting: a "
+                      "note filed under the wrong session is never handed back, and "
+                      "nothing would look broken.)")}
+
+
 def state_path(session_id: str) -> Path:
     """Under the home directory. NEVER in a working tree -- see context_router's
     `get_state_file` for what happened the last time runtime state lived in a repo."""

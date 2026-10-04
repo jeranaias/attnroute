@@ -32,12 +32,16 @@ def project(tmp_path):
     return d
 
 
-def run(home, project, *args, stdin=None):
+def run(home, project, *args, stdin=None, env_extra=None):
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
+    # Both names are cleared, so a test that means to exercise the environment has to say
+    # so -- and so this suite cannot pass by inheriting the id of the session running it.
     env.pop("CLAUDE_SESSION_ID", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    env.update(env_extra or {})
     return subprocess.run([sys.executable, "-m", "attnroute.cli", *args],
                           cwd=str(project), text=True, input=stdin, capture_output=True,
                           env=env, timeout=300)
@@ -124,3 +128,35 @@ def test_the_claimed_rows_are_explained_in_the_listing(home, project):
     shown = run(home, project, "state", "show", "--session", "s")
     assert "CLAIMED" in shown.stdout
     assert "mentions only" in shown.stdout
+
+
+def test_a_note_lands_on_the_session_the_CLI_actually_names(home, project):
+    """⚠ END TO END, with the environment set exactly as 2.1.280 sets it. This is the test
+    that would have caught the blocker: before the fix, `note add` filed under "local" and
+    `state show --session <real id>` found nothing."""
+    env_id = "4b298fa8-0cd4-4405-9453-4035018bcd25"
+    added = run(home, project, "note", "add", "the ruling that must survive",
+                "--kind", "ruling", env_extra={"CLAUDE_CODE_SESSION_ID": env_id})
+    assert added.returncode == 0, added.stderr
+
+    shown = run(home, project, "state", "show", "--session", env_id)
+    assert shown.returncode == 0, shown.stderr
+    assert "the ruling that must survive" in shown.stdout
+
+
+def test_the_note_is_not_filed_under_a_made_up_session(home, project):
+    """Positive control for the test above: with NO session in the environment the command
+    must fail, not quietly invent one."""
+    added = run(home, project, "note", "add", "a ruling", "--kind", "ruling")
+    assert added.returncode == 1
+    assert "no session id in the environment" in added.stderr
+
+
+def test_the_handback_reads_the_same_session(home, project):
+    env_id = "sess-42"
+    run(home, project, "note", "add", "depth gate refuses unknown legs", "--kind", "ruling",
+        env_extra={"CLAUDE_CODE_SESSION_ID": env_id})
+    built = run(home, project, "state", "handback",
+                env_extra={"CLAUDE_CODE_SESSION_ID": env_id})
+    assert built.returncode == 0, built.stderr
+    assert "depth gate refuses unknown legs" in built.stdout

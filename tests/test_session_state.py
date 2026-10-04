@@ -398,3 +398,41 @@ class TestPersistence:
     def test_the_save_is_atomic(self):
         src = Path(ss.__file__).read_text(encoding="utf-8")
         assert "os.replace(tmp, path)" in src
+
+
+class TestTheSessionIdComesFromTheRightVariable:
+    """⚠ THE BUG THIS CLASS EXISTS FOR. The code read `CLAUDE_SESSION_ID`. In a Bash tool
+    call under 2.1.280 that variable is UNSET; the id is in `CLAUDE_CODE_SESSION_ID`
+    (verified by printing the environment inside the tool, not by reading the binary). So
+    every note was filed under a session called "local", the handback read the real id, and
+    the two never met. Nothing raised. The lever simply did nothing -- the worst way for a
+    measurement tool to be broken.
+    """
+
+    def test_the_variable_the_CLI_actually_sets_is_preferred(self):
+        found = ss.session_from_env({"CLAUDE_CODE_SESSION_ID": "real-id",
+                                     "CLAUDE_SESSION_ID": "stale-id"})
+        assert found["session"] == "real-id"
+        assert found["var"] == "CLAUDE_CODE_SESSION_ID"
+
+    def test_the_older_name_still_works_as_a_fallback(self):
+        found = ss.session_from_env({"CLAUDE_SESSION_ID": "legacy-id"})
+        assert found["session"] == "legacy-id"
+        assert found["var"] == "CLAUDE_SESSION_ID"
+
+    def test_an_absent_id_is_REFUSED_rather_than_defaulted(self):
+        """A wrong default is invisible; a refusal is not. There is no "local" session."""
+        found = ss.session_from_env({})
+        assert found["session"] is None
+        assert "CLAUDE_CODE_SESSION_ID" in found["why"]
+        assert "--session" in found["why"]
+
+    def test_a_blank_value_counts_as_absent(self):
+        assert ss.session_from_env({"CLAUDE_CODE_SESSION_ID": "   "})["session"] is None
+
+    def test_no_module_defaults_a_session_to_local(self):
+        """Blunt, and deliberately so: the string that caused this is not to come back."""
+        src = Path(ss.__file__).read_text(encoding="utf-8")
+        from attnroute import cli
+        src += Path(cli.__file__).read_text(encoding="utf-8")
+        assert 'or "local"' not in src
