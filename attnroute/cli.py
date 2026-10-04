@@ -32,39 +32,87 @@ def cmd_status(args):
     print("attnroute Status")
     print("=" * 50)
 
-    # Check available features
-    features = []
+    # ── EVERY CAPABILITY WITH ITS STATE, INCLUDING THE ABSENT ONES ─────────────────────
+    #
+    # This block used to append only the features that WERE importable and print the list.
+    # A degraded install therefore printed a SHORTER list and read as complete: nothing said
+    # that outlining had fallen back to regex, or that semantic search was not installed.
+    #
+    # An absence that is not stated reads as "nothing to report", which is how a disabled
+    # capability goes unnoticed. So each row is printed either way, and an absent row carries
+    # the reason -- "off" without a reason is not actionable.
+    capabilities = []
 
-    try:
-        from attnroute.indexer import BM25_AVAILABLE, MODEL2VEC_AVAILABLE
-        if BM25_AVAILABLE:
-            features.append("BM25 search")
-        if MODEL2VEC_AVAILABLE:
-            features.append("Semantic search")
-    except ImportError:
-        pass
+    def _probe(label, importer):
+        """(label, ok, detail) -- never raises, so one missing extra cannot hide the rest."""
+        try:
+            ok, detail = importer()
+        except Exception as exc:          # ImportError, and anything a broken extra raises
+            ok, detail = False, f"could not be probed: {exc}"
+        capabilities.append((label, ok, detail))
 
-    try:
-        from attnroute.graph_retriever import GRAPH_AVAILABLE
+    def _bm25():
+        from attnroute.indexer import BM25_AVAILABLE
+        return BM25_AVAILABLE, "bm25s" if BM25_AVAILABLE else "bm25s is not installed (extra: search)"
+
+    def _semantic():
+        from attnroute.indexer import MODEL2VEC_AVAILABLE
+        return (MODEL2VEC_AVAILABLE,
+                "model2vec" if MODEL2VEC_AVAILABLE else "model2vec is not installed (extra: search)")
+
+    def _graph():
+        # ⚠ graph_retriever.TREE_SITTER_AVAILABLE IS MISNAMED: it is set by importing
+        #   `get_parser` from tree_sitter_languages -- the LANGUAGE PACK, not tree_sitter
+        #   itself. So a reader who sees it False concludes tree-sitter is missing when
+        #   tree-sitter may be installed and working. The two causes are reported apart here
+        #   rather than as one sentence, because they have different remedies: networkx
+        #   installs anywhere, and the language pack publishes no wheel past cp312.
+        from attnroute.graph_retriever import (
+            GRAPH_AVAILABLE,
+            NETWORKX_AVAILABLE,
+            TREE_SITTER_AVAILABLE as LANGUAGE_PACK_AVAILABLE,
+        )
         if GRAPH_AVAILABLE:
-            features.append("Graph retrieval")
-    except ImportError:
-        pass
+            return True, "networkx + tree_sitter_languages"
+        why = []
+        if not NETWORKX_AVAILABLE:
+            why.append("networkx is not installed (extra: graph)")
+        if not LANGUAGE_PACK_AVAILABLE:
+            why.append("tree_sitter_languages is not importable -- it publishes no wheel for "
+                       "this Python, and it is the same package the outliner needs")
+        if not why:
+            why.append("both dependencies import but the repo mapper did not load")
+        return False, "; ".join(why)
 
-    try:
+    def _compression():
         from attnroute.compressor import ANTHROPIC_AVAILABLE
-        if ANTHROPIC_AVAILABLE:
-            features.append("Memory compression")
-    except ImportError:
-        pass
+        return (ANTHROPIC_AVAILABLE,
+                "anthropic" if ANTHROPIC_AVAILABLE else "anthropic is not installed (extra: compression)")
 
-    try:
+    def _learning():
         from attnroute.learner import Learner  # noqa: F401
-        features.append("Learning engine")
-    except ImportError:
-        pass
+        return True, "learner importable"
 
-    print(f"Features: {', '.join(features) if features else 'Core only'}")
+    def _outline():
+        from attnroute.outliner import OUTLINE_BACKEND_TREE_SITTER, outline_backend
+        backend, reason = outline_backend()
+        return backend == OUTLINE_BACKEND_TREE_SITTER, f"{backend} -- {reason}"
+
+    _probe("BM25 search", _bm25)
+    _probe("Semantic search", _semantic)
+    _probe("Graph retrieval", _graph)
+    _probe("Memory compression", _compression)
+    _probe("Learning engine", _learning)
+    _probe("Source outlining", _outline)
+
+    print("Capabilities:")
+    for label, ok, detail in capabilities:
+        print(f"  {'OK      ' if ok else 'DEGRADED'}  {label}: {detail}")
+
+    missing = [label for label, ok, _ in capabilities if not ok]
+    if missing:
+        print(f"  {len(missing)} of {len(capabilities)} capabilities are not at full function: "
+              f"{', '.join(missing)}")
 
     # Check for keywords.json
     keywords_paths = [
