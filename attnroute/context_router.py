@@ -411,8 +411,25 @@ def resolve_docs_root() -> Path:
 # CONFIGURATION
 # ============================================================================
 
-# State file location
-PROJECT_STATE = Path(".claude/attn_state.json")
+# ═══ STATE NEVER LANDS IN A WORKING TREE ═══════════════════════════════════════════════
+#
+# WARNING: IT USED TO, IN EVERY REPOSITORY THE HOOK RAN IN. `get_state_file` did
+#   `PROJECT_STATE.parent.mkdir(...)` and returned the project path, so "project-local
+#   preferred" meant "always project-local": attnroute created `.claude/` in the working
+#   tree and wrote attention scores into it on every turn.
+#
+#   This was invisible until the `save_state` crash was fixed, because the write never
+#   succeeded. The moment it did, `.claude/attn_state.json` turned up in `git status` --
+#   and was committed by accident in the very PR that fixed it. Across eight team
+#   worktrees, a runtime file in `git status` is a file somebody commits.
+#
+#   State is still per project. It just lives under the user's home directory, keyed by
+#   the project path, the same way Claude Code keys its own transcripts.
+#: Legacy location, still READ if a previous version left one, never created.
+LEGACY_PROJECT_STATE = Path(".claude/attn_state.json")
+
+#: Per-project state, outside any repository.
+STATE_DIR = Path.home() / ".claude" / "attn_state"
 GLOBAL_STATE = Path.home() / ".claude" / "attn_state.json"
 HISTORY_FILE = Path.home() / ".claude" / "attention_history.jsonl"
 
@@ -903,15 +920,60 @@ _COMPILED_KEYWORDS: dict[str, re.Pattern] = _build_compiled_keywords(KEYWORDS)
 # STATE MANAGEMENT
 # ============================================================================
 
-def get_state_file() -> Path:
-    """Get appropriate state file (project-local preferred)."""
-    # Use try/except instead of exists() to avoid TOCTOU race
+def project_slug(cwd: Path | None = None) -> str:
+    """A filesystem-safe, stable name for this project.
+
+    The readable part is the path with its separators flattened, so a human can tell whose
+    state file this is; the hash is what actually guarantees two projects never collide
+    after the readable part is truncated.
+    """
+    import hashlib
+
+    root = Path(cwd) if cwd else Path.cwd()
     try:
-        PROJECT_STATE.parent.mkdir(parents=True, exist_ok=True)
-        return PROJECT_STATE
+        root = root.resolve()
+    except OSError:
+        pass
+    text = str(root)
+    # The useful end of a path is its TAIL. Keeping the first 60 characters of
+    # "C:/Users/jesse/AppData/Local/Temp/pytest-of-jesse/pytest-276/meridian" yields all
+    # prefix and no project name, which defeats the point of having a readable part.
+    flat = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()
+    readable = flat[-60:].strip("-") or "project"
+    digest = hashlib.sha256(text.lower().encode("utf-8")).hexdigest()[:8]
+    return f"{readable}-{digest}"
+
+
+def get_state_file() -> Path:
+    """Where attention state lives for this project. NEVER inside the working tree.
+
+    A legacy file in the working tree is MIGRATED rather than adopted. Adopting it would
+    be worse than either alternative: the file would keep being written inside the repo
+    forever, and in a worktree somebody would eventually commit it. Reading it but writing
+    elsewhere would be worse still -- the stale copy would be read back on every later run
+    and the new one never consulted.
+    """
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        destination = STATE_DIR / f"{project_slug()}.json"
     except OSError:
         GLOBAL_STATE.parent.mkdir(parents=True, exist_ok=True)
         return GLOBAL_STATE
+
+    try:
+        if LEGACY_PROJECT_STATE.is_file():
+            if not destination.exists():
+                destination.write_text(
+                    LEGACY_PROJECT_STATE.read_text(encoding="utf-8"), encoding="utf-8")
+            LEGACY_PROJECT_STATE.unlink()
+            print(f"[attnroute] moved attention state out of the working tree: "
+                  f"{LEGACY_PROJECT_STATE} -> {destination}", file=sys.stderr)
+    except OSError as exc:
+        # Migration is best-effort: a state file is a cache, and failing to move it must
+        # not cost the user their turn. It is reported rather than retried silently.
+        print(f"[attnroute] could not migrate {LEGACY_PROJECT_STATE}: {exc!r}",
+              file=sys.stderr)
+    return destination
 
 
 def load_state(state_file: Path) -> dict:
