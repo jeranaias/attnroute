@@ -25,7 +25,7 @@ from attnroute import no_egress
 
 HOOK_MODULES = ("attnroute.context_router", "attnroute.session_init",
                 "attnroute.telemetry_record", "attnroute.read_ledger",
-                "attnroute.session_state")
+                "attnroute.session_state", "attnroute.output_cap")
 
 PROBE = Path(__file__).resolve().parent / "egress_probe.py"
 REPO = Path(__file__).resolve().parents[1]
