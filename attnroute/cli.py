@@ -167,6 +167,17 @@ def cmd_report(args):
         sys.argv = original_argv
 
 
+def cmd_savings(args):
+    """Measured saving from transcript usage, plus quality and the levers' own estimates."""
+    from attnroute import savings
+    res = savings.analyse(project_filter=args.project)
+    if args.json:
+        import json as _json
+        print(_json.dumps(res, default=str, indent=2))
+    else:
+        print(savings.render(res))
+
+
 def cmd_benchmark(args):
     """Run performance benchmarks."""
     try:
@@ -695,6 +706,13 @@ For more information, visit: https://github.com/jeranaias/attnroute
     report_parser = subparsers.add_parser("report", help="Show efficiency report")
     report_parser.add_argument("--days", type=int, default=7, help="Number of days to analyze")
 
+    # savings command
+    sav_parser = subparsers.add_parser(
+        "savings", help="Measured saving from transcript usage (treated vs baseline), with CI")
+    sav_parser.add_argument("--project", default=None,
+                            help="Only transcripts whose project folder contains this text")
+    sav_parser.add_argument("--json", action="store_true", help="Machine-readable output")
+
     # benchmark command
     bench_parser = subparsers.add_parser("benchmark", help="Run performance benchmarks")
     bench_parser.add_argument("--scenario", choices=["all", "quick", "single_file", "multi_file"],
@@ -824,6 +842,7 @@ For more information, visit: https://github.com/jeranaias/attnroute
         "init": cmd_init,
         "status": cmd_status,
         "report": cmd_report,
+        "savings": cmd_savings,
         "benchmark": cmd_benchmark,
         "compress": cmd_compress,
         "graph": cmd_graph,

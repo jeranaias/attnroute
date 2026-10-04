@@ -508,6 +508,27 @@ NUDGE_TEXT = (
 )
 
 
+def _promotion_counts(state: dict, repo) -> dict:
+    """How many notes are PROMOTED / CLAIMED / UNPROMOTED right now."""
+    counts = {"PROMOTED": 0, "CLAIMED": 0, "UNPROMOTED": 0}
+    for n in state.get("notes") or []:
+        try:
+            counts[check_promotion(n, repo)["state"]] += 1
+        except Exception:                        # noqa: BLE001
+            pass
+    return counts
+
+
+def _emit(event: str, payload: dict, **fields) -> None:
+    """One record on the shared telemetry stream. Best-effort: never costs the turn."""
+    try:
+        from attnroute.telemetry_stream import emit
+        emit("session_state", event, session_id=payload.get("session_id"),
+             agent_id=payload.get("agent_id"), arm=None, acting=True, **fields)
+    except Exception:                            # noqa: BLE001
+        pass
+
+
 def hook(payload: dict, repo: Path | str = ".") -> dict | None:
     """One hook event -> the payload to print, or None. Never raises on its own account."""
     event = str(payload.get("hook_event_name") or "")
@@ -538,6 +559,9 @@ def hook(payload: dict, repo: Path | str = ".") -> dict | None:
             state.setdefault("facts", {})["board_error"] = repr(exc)[:200]
         built = handback(state, rows, repo=repo)
         mark_handed_back(state, built["included"])
+        _emit("handback", payload, tokens=built["tokens"], dropped_n=built["dropped"],
+              included_n=len(built["included"]), budget=built.get("budget"),
+              promotion=_promotion_counts(state, repo))
         state["last_handback_tokens"] = built["tokens"]
         state["turns_since_nudge"] = NUDGE_EVERY_TURNS      # a fresh window may be nudged
         out = {"hookSpecificOutput": {"hookEventName": "SessionStart",
@@ -550,6 +574,7 @@ def hook(payload: dict, repo: Path | str = ".") -> dict | None:
         if due["due"]:
             edits = sum(int(n) for n in (state.get("facts", {}).get("edited") or {}).values())
             state["turns_since_nudge"] = 0
+            _emit("nudge", payload, edits=edits, why=due["why"])
             out = {"hookSpecificOutput": {
                 "hookEventName": "Stop",
                 "additionalContext": NUDGE_TEXT.format(edits=edits)}}

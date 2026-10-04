@@ -189,7 +189,21 @@ def _tokens(chars: int) -> int:
     return max(0, int(chars / 3.3))
 
 
+_T0 = None   # set by main(); lets every record carry the hook's own latency
+
+
 def _log(record: dict) -> None:
+    if _T0 is not None:
+        import time
+        record["latency_ms"] = round((time.perf_counter() - _T0) * 1000.0, 2)
+    try:
+        from attnroute.telemetry_stream import emit
+        r = dict(record)
+        emit("output_cap", r.pop("event", "?") + ":" + str(r.pop("phase", "")),
+             session_id=r.pop("session_id", None), agent_id=r.pop("agent_id", None),
+             arm=r.pop("arm", None), acting=r.pop("acting", None), **r)
+    except Exception:
+        pass
     try:
         d = Path.home() / ".claude" / "telemetry"
         d.mkdir(parents=True, exist_ok=True)
@@ -244,7 +258,10 @@ def handle(payload: dict) -> dict | None:
 def main(argv=None) -> int:
     """Hook entry point. Never fails the caller's turn: every path exits 0."""
     import sys
+    import time
 
+    global _T0
+    _T0 = time.perf_counter()
     from attnroute.no_egress import lock_down
     lock_down()                 # a hook makes no network call, ever
     try:
