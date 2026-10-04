@@ -28,9 +28,31 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[all,dev]"
+          # `.[all]` CANNOT RESOLVE ON 3.13+, and it is not our code: the `graph` extra pins
+          # tree-sitter-languages>=1.10.0, whose latest release (1.10.2) publishes wheels for
+          # cp310, cp311 and cp312 ONLY -- no cp313, no cp314, and no sdist to build from.
+          # Measured against the PyPI JSON API on 2026-10-03. That is why every 3.13 job
+          # (ubuntu, windows AND macos) failed on the last run while 3.10-3.12 passed on all
+          # three: an unsatisfiable dependency, not a defect in this package.
+          #
+          # So 3.13+ installs every other extra PLUS the two graph dependencies that do
+          # resolve, and omits only tree-sitter-languages. The run is therefore a real check
+          # of everything except the tree-sitter OUTLINE path, which is NOT CHECKED on 3.13+
+          # rather than silently passing. `outliner.extract_outline` already falls back when
+          # the pack is absent, and the suite passes without it -- measured: 345 tests pass on
+          # 3.14 with tree_sitter_languages not installed.
+          #
+          # RE-CHECK WHEN: tree-sitter-languages ships a cp313 wheel, or the outliner moves to
+          # the per-language `tree-sitter-<lang>` packages. The migration needs tests first --
+          # outliner.py has no test importing it (issue #8).
+          if python -c "import sys; sys.exit(0 if sys.version_info >= (3, 13) else 1)"; then
+            pip install -e ".[search,compression,benchmark,dev]" "tree-sitter>=0.20.0" "networkx>=3.0"
+          else
+            pip install -e ".[all,dev]"
+          fi
 
       - name: Run tests
         run: pytest tests/ -v --tb=short

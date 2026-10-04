@@ -12,11 +12,11 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RESET = "\033[0m"
 
-print(f"$ pip install attnroute && attnroute init")
+print("$ pip install attnroute && attnroute init")
 print(f"  {GREEN}Ready!{RESET} 4 plugins active. No restart needed.")
 print()
-print(f"$ claude")
-print(f">> fix the login timeout bug in auth.py")
+print("$ claude")
+print(">> fix the login timeout bug in auth.py")
 print()
 print(f"  {DIM}attnroute injected 3 files in 43ms:{RESET}")
 print(f"  {BOLD}auth.py{RESET}      {RED}HOT{RESET}   full source")
