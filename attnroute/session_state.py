@@ -548,12 +548,23 @@ def hook(payload: dict, repo: Path | str = ".") -> dict | None:
         rows = {}
         try:
             from attnroute.board import LEAD_FILE, read as board_read
-            team = os.environ.get("ATTNROUTE_TEAM", "").strip()
-            # The lead's row always; this team's row when the session says who it is.
+            from attnroute.team import current as current_team
+            # WARNING: NOT `os.environ["ATTNROUTE_TEAM"]` ALONE. The hooks are loaded
+            #   globally on the shared machine and the variable is set per worktree, so a
+            #   session started outside a worktree got no team -- and therefore no board
+            #   row, silently, which looks exactly like a team that has not written one.
+            #   `team.current` falls back to the cwd via a mapping file; the variable still
+            #   wins when set.
+            found = current_team(repo)
+            team = found.get("team")
+            # The lead's row always; this team's row when we know which team this is.
             # Reading is local-ref only, so this costs no network -- see board.read.
             rows[LEAD_FILE] = board_read(LEAD_FILE, repo=repo)
             if team:
                 rows[team] = board_read(team, repo=repo)
+            else:
+                # Said out loud in the handback rather than left as an absent row.
+                state.setdefault("facts", {})["team_unknown"] = found.get("why")
         except Exception as exc:                 # noqa: BLE001
             rows = {}
             state.setdefault("facts", {})["board_error"] = repr(exc)[:200]
