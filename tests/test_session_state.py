@@ -152,6 +152,15 @@ class TestPromotionHasThreeStatesNotTwo:
     def test_no_claim_is_UNPROMOTED(self):
         assert ss.check_promotion({"text": "a ruling"})["state"] == "UNPROMOTED"
 
+    def test_the_UNPROMOTED_message_says_the_note_IS_carried(self):
+        """⚠ FROM THE FIELD. It used to say "exists only in a context window", and a team
+        read that as "this will not survive compaction", so they re-recorded every note by
+        hand -- the exact work the handback exists to remove. UNPROMOTED is the SAFE state:
+        kept in the state file, handed back every window. The message has to say so."""
+        why = ss.check_promotion({"text": "a ruling"})["why"]
+        assert "handed back every window" in why
+        assert "only in a context window" not in why, "the misreading must not come back"
+
     def test_a_claim_to_a_missing_file_is_CLAIMED(self, repo):
         note = {"text": "depth gate ruling", "promoted_to": "docs/nope.md"}
         answer = ss.check_promotion(note, repo)

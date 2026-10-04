@@ -9,6 +9,12 @@ Every record is one JSON object on one line of ~/.claude/telemetry/attnroute.jso
     session_id  the Claude Code session (the PARENT's id for a subagent)
     agent_id    the subagent's id, or null for the main loop
     arm         the holdout arm the decision was made in, or null when no holdout applies
+    team        the team this session belongs to, and `team_source` where that came from
+                ("env", "map" or "none"). Filled in automatically: the hooks are loaded
+                globally on the shared machine while ATTNROUTE_TEAM is set per worktree, so
+                a session started outside a worktree would otherwise record no team at all,
+                and telemetry that cannot be split by team is most of the point of having
+                teams. A caller may pass `team=` to override it.
     acting      true when the lever was allowed to change what the model saw
     ... plus the component's own fields.
 
@@ -37,6 +43,25 @@ def emit(component: str, event: str, *, session_id=None, agent_id=None, arm=None
     rec = {"v": SCHEMA_VERSION, "ts": round(time.time(), 3), "component": component,
            "event": event, "session_id": session_id, "agent_id": agent_id, "arm": arm,
            "acting": acting}
+    # The team is resolved once per process and attached here rather than at each call
+    # site, so no lever can forget it. `team_source` travels with it because a team taken
+    # from a mapping file and a team declared by the session are different kinds of fact,
+    # and a stale mapping should be auditable after the event rather than indistinguishable.
+    # WARNING: THE CALLER'S OWN `team=` HAS TO WIN, AND IT DID NOT. Setting these before the
+    #   `fields` loop below meant "team" was already a key, so an explicit `team=` was
+    #   dropped on the floor -- while the docstring said a caller could override it. Caught
+    #   by noticing the test I had written for it was tautological.
+    if "team" not in fields:
+        try:
+            from attnroute.team import current as _team
+            found = _team()
+            rec["team"] = found.get("team")
+            rec["team_source"] = found.get("source")
+        except Exception:                  # noqa: BLE001 - a label must not cost a turn
+            rec["team"] = None
+            rec["team_source"] = "none"
+    else:
+        rec["team_source"] = fields.get("team_source", "caller")
     for k, v in fields.items():
         if k not in rec:
             rec[k] = v

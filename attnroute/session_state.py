@@ -202,7 +202,16 @@ def check_promotion(note: dict, repo: Path | str = ".") -> dict:
     """
     target = note.get("promoted_to")
     if not target:
-        return {"state": "UNPROMOTED", "why": "exists only in a context window"}
+        # WARNING: THIS WORDING CAUSED A TEAM TO DO THE EXACT OPPOSITE OF THE DESIGN.
+        #   It used to read "exists only in a context window". T7 read that as "this note
+        #   will not survive compaction", concluded bare notes were worthless, and
+        #   re-recorded everything by hand -- which is precisely the work the handback
+        #   exists to remove. An UNPROMOTED note is the SAFE case: it is in the state file
+        #   and it is handed back EVERY window until it is written down somewhere. The
+        #   message now says what is true of the note, not what is absent from the repo.
+        return {"state": "UNPROMOTED",
+                "why": ("kept in the state file and handed back every window; not yet "
+                        "written into a repo file")}
     path = Path(repo) / target
     try:
         if not path.is_file():
@@ -376,7 +385,7 @@ def handback(state: dict, board_rows: dict | None = None, repo: Path | str = "."
     #   not fit" line was appended unchecked. The one line whose whole job is to report the
     #   budget was the line that broke it.
     reserve = estimate_tokens(
-        f"- 9999 further item(s) did not fit the {budget}-token handback budget and "
+        f"- (!) 9999 further item(s) did not fit the {budget}-token handback budget and "
         f"were NOT carried over. `attnroute state show` lists them all.") + 4
     content_budget = max(0, budget - reserve)
 
@@ -430,8 +439,8 @@ def handback(state: dict, board_rows: dict | None = None, repo: Path | str = "."
         derived.append("- DERIVED commits/pushes: "
                        + "; ".join(facts["commands"][-4:]))
     if facts.get("view_complete") is False:
-        derived.append("- DERIVED ⚠ the transcript view was INCOMPLETE, so the facts above "
-                       "may be missing earlier work in this window")
+        derived.append("- DERIVED (!) the transcript view was INCOMPLETE, so the facts "
+                       "above may be missing earlier work in this window")
     for line in derived:
         if fits(line):
             text += "\n" + line
@@ -439,7 +448,7 @@ def handback(state: dict, board_rows: dict | None = None, repo: Path | str = "."
             dropped += 1
 
     if dropped:
-        text += (f"\n- ⚠ {dropped} further item(s) did not fit the "
+        text += (f"\n- (!) {dropped} further item(s) did not fit the "
                  f"{budget}-token handback budget and were NOT carried over. "
                  f"`attnroute state show` lists them all.")
 
@@ -548,12 +557,23 @@ def hook(payload: dict, repo: Path | str = ".") -> dict | None:
         rows = {}
         try:
             from attnroute.board import LEAD_FILE, read as board_read
-            team = os.environ.get("ATTNROUTE_TEAM", "").strip()
-            # The lead's row always; this team's row when the session says who it is.
+            from attnroute.team import current as current_team
+            # WARNING: NOT `os.environ["ATTNROUTE_TEAM"]` ALONE. The hooks are loaded
+            #   globally on the shared machine and the variable is set per worktree, so a
+            #   session started outside a worktree got no team -- and therefore no board
+            #   row, silently, which looks exactly like a team that has not written one.
+            #   `team.current` falls back to the cwd via a mapping file; the variable still
+            #   wins when set.
+            found = current_team(repo)
+            team = found.get("team")
+            # The lead's row always; this team's row when we know which team this is.
             # Reading is local-ref only, so this costs no network -- see board.read.
             rows[LEAD_FILE] = board_read(LEAD_FILE, repo=repo)
             if team:
                 rows[team] = board_read(team, repo=repo)
+            else:
+                # Said out loud in the handback rather than left as an absent row.
+                state.setdefault("facts", {})["team_unknown"] = found.get("why")
         except Exception as exc:                 # noqa: BLE001
             rows = {}
             state.setdefault("facts", {})["board_error"] = repr(exc)[:200]
