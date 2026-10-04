@@ -62,6 +62,21 @@ STATE_VERSION = 1
 
 EDIT_TOOLS = ("Edit", "Write", "NotebookEdit", "MultiEdit")
 
+#: The SessionStart sources that deserve a handback. The enum in the installed CLI is
+#: {startup, resume, clear, compact, fork}, and the choice is per value rather than "all":
+#:
+#:   compact  the case this was built for -- the window was summarised away.
+#:   resume   THE SAME SESSION CONTINUING, and it got nothing. A resumed session has the
+#:            same id and the same state file, and every reason a compaction needs a
+#:            handback applies to it.
+#:   clear    likewise: the id survives, the context does not.
+#:
+#: Not `startup`: a brand-new id has an empty state file, so a handback would be an empty
+#: message. Not `fork`: a fork gets a new id too, and reaching into the parent's notes is a
+#: question about whose rulings those are -- worth deciding on purpose, not by inclusion in
+#: a tuple.
+HANDBACK_SOURCES = ("compact", "resume", "clear")
+
 #: Lines in a tool result that state a fact worth carrying. Deliberately narrow: each one
 #: is a thing the transcript says in so many words, not a thing inferred from prose.
 TEST_RESULT = re.compile(r"\b(\d+) (passed|failed)[^\n]{0,80}", re.I)
@@ -284,8 +299,9 @@ def check_promotion(note: dict, repo: Path | str = ".") -> dict:
         #   and it is handed back EVERY window until it is written down somewhere. The
         #   message now says what is true of the note, not what is absent from the repo.
         return {"state": "UNPROMOTED",
-                "why": ("kept in the state file and handed back every window; not yet "
-                        "written into a repo file")}
+                "why": ("THIS SESSION ONLY -- handed back every window of this session, "
+                        "invisible to a new session, another team, or this one after a "
+                        "restart; not yet written into a repo file")}
     path = Path(repo) / target
     try:
         if not path.is_file():
@@ -642,7 +658,10 @@ NUDGE_TEXT = (
     "compaction unless it is written down. One line is enough:\n"
     "  {command} note add --kind ruling \"<the ruling>\" [--promoted-to <path>]\n"
     "Nothing infers these from your prose, by design. (That path is this session's own "
-    "install; `attnroute` on PATH may be a different one.)"
+    "install; `attnroute` on PATH may be a different one.)\n"
+    "An UNPROMOTED note is THIS SESSION ONLY: a new session, another team, or this one "
+    "after a restart will not see it. For a ruling that must outlive the session, add "
+    "--promoted-to <repo path> (the claim is checked), or publish it to the team board."
 )
 
 
@@ -682,7 +701,7 @@ def hook(payload: dict, repo: Path | str = ".") -> dict | None:
         derive_facts(state, payload.get("transcript_path"))
         state["window"] = int(state.get("window", 0)) + 1
 
-    elif event == "SessionStart" and str(payload.get("source") or "") == "compact":
+    elif event == "SessionStart" and str(payload.get("source") or "") in HANDBACK_SOURCES:
         rows = {}
         try:
             from attnroute.board import LEAD_FILE, read as board_read
