@@ -14,6 +14,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from attnroute.used_signal import WHY_NOT_TRUSTED
+
 try:
     from attnroute import __version__ as VERSION
 except ImportError:
@@ -157,7 +159,12 @@ def report_waste(turns: list):
 
     if waste_ratios:
         avg = sum(waste_ratios) / len(waste_ratios)
-        print(f"  Avg waste ratio: {avg:.1%} (target: <40%)")
+        # ⚠ NO TARGET. A number printed beside a target is an instruction, and this one cannot
+        #   be met by a working router: `used` needs a tool call that a successful injection
+        #   removes, so the ratio rises as routing improves. The figure is still worth seeing
+        #   -- it is a diagnostic -- so it is printed with what it does and does not mean.
+        print(f"  Avg injected-not-followed-by-a-tool-call: {avg:.1%}")
+        print(f"    diagnostic only -- {WHY_NOT_TRUSTED}")
     print()
 
     # Injection size distribution (chars and tokens)

@@ -21,6 +21,8 @@ The learner runs automatically:
   - track_turn_usage() updates stats after each turn
 """
 
+from attnroute.used_signal import trust_used_signal
+
 import json
 import re
 import sys
@@ -459,8 +461,12 @@ class Learner:
                             "turn": turn.get("turn_id", "?"),
                         })
 
-                # Mild penalty: reduce affinity toward unused files
-                for f in unused:
+                # ⚠ THE PENALTY IS OFF BY DEFAULT: an injected-but-not-"used" file is the
+                #   SUCCESS case, not the failure case, because `used` needs a tool call that a
+                #   working injection removes. Training against it taught the learner to prefer
+                #   documents that did not answer the question.
+                #   See attnroute/used_signal.py for the measurement.
+                for f in (unused if trust_used_signal() else ()):
                     if f in affinities[word]:
                         old = affinities[word][f]
                         new = max(0.0, old - base_lr * 0.3)
