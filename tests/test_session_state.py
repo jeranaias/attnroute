@@ -436,3 +436,23 @@ class TestTheSessionIdComesFromTheRightVariable:
         from attnroute import cli
         src += Path(cli.__file__).read_text(encoding="utf-8")
         assert 'or "local"' not in src
+
+
+class TestTelemetry:
+    def test_positive_control_a_handback_writes_one_stream_record(self, repo, home):
+        from attnroute import telemetry_stream
+        state = ss.empty_state("s")
+        ss.add_note(state, "depth gate refuses UNKNOWN legs", kind="ruling")
+        ss.save("s", state)
+        ss.hook({"hook_event_name": "SessionStart", "source": "compact",
+                 "session_id": "s", "cwd": str(repo)}, repo=repo)
+        recs = [r for r in telemetry_stream.read() if r["component"] == "session_state"]
+        assert len(recs) == 1 and recs[0]["event"] == "handback"
+        assert recs[0]["session_id"] == "s" and recs[0]["tokens"] > 0
+        assert recs[0]["promotion"]["UNPROMOTED"] == 1
+
+    def test_a_plain_startup_writes_nothing(self, repo, home):
+        from attnroute import telemetry_stream
+        ss.hook({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s"},
+                repo=repo)
+        assert not [r for r in telemetry_stream.read() if r["component"] == "session_state"]
