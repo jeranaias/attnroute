@@ -29,6 +29,14 @@ NEVER REWRITTEN: background commands, commands carrying the escape marker `attnr
 anything that is not the Bash tool. Read is never capped -- an explicit range is the caller
 saying what it wants, and an unranged Read is already bounded by the tool itself.
 
+ALSO DECLINED: a command that sets its own trap, because a trap is not a stack and it would
+replace the one that prints the output -- the output would vanish, not shrink.
+
+STATED CHOICES, so nobody mistakes them for accidents: output no longer streams while a capped
+command runs (it arrives when the command ends); head/tail cut on bytes and can split a UTF-8
+character at the seam; captured files are swept after 24 h, keeping at most 200; a command
+killed by the tool's timeout leaves its output on disk without a marker.
+
 DEFAULT IS OBSERVE, like the ledger: the PostToolUse half measures each Bash result and logs what
 the cap WOULD have saved, and the command is not touched unless ATTNROUTE_CAP_ACT is set.
 """
@@ -36,6 +44,8 @@ the cap WOULD have saved, and the command is not touched unless ATTNROUTE_CAP_AC
 import hashlib
 import json
 import os
+import re
+import time
 from pathlib import Path
 
 #: Results at or under this many characters are never touched. ~1.5k tokens of mixed output:
@@ -91,7 +101,37 @@ def eligible(tool_name: str, tool_input) -> tuple:
         return False, "background command: its output is read later, not returned now"
     if ESCAPE in cmd:
         return False, "the caller asked for the full output"
+    if _TRAP.search(cmd):
+        # A trap is not a stack: the command's own `trap ... EXIT` would REPLACE the one that
+        # prints the captured output, and every line of it would vanish with no marker.
+        return False, "the command sets its own trap"
     return True, ""
+
+
+_TRAP = re.compile(r"\btrap\b")
+
+#: Captured outputs older than this are swept, and at most this many are kept.
+OUTPUT_TTL_S = 24 * 3600
+OUTPUT_KEEP = 200
+
+
+def sweep(d: Path, now: float | None = None) -> int:
+    """Delete captured outputs past their TTL, and the oldest beyond OUTPUT_KEEP. -> removed."""
+    now = time.time() if now is None else now
+    try:
+        files = sorted((e for e in os.scandir(d) if e.is_file() and e.name.endswith(".log")),
+                       key=lambda e: e.stat().st_mtime, reverse=True)
+    except OSError:
+        return 0
+    removed = 0
+    for i, e in enumerate(files):
+        try:
+            if i >= OUTPUT_KEEP or now - e.stat().st_mtime > OUTPUT_TTL_S:
+                os.unlink(e.path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def _sq(s: str) -> str:
@@ -106,19 +146,19 @@ def wrap(command: str, out_path: str) -> str:
     the original cannot swallow the closing brace.
     """
     f = _sq(out_path)
-    marker = (
-        f"[attnroute] output capped: $((__ar_h + __ar_t)) of $__ar_n chars shown "
-        f"(head {HEAD_CHARS} + tail {TAIL_CHARS}). "
-        f"Full output: {out_path} -- Read it, or re-run with '# {ESCAPE}' to see everything."
-    )
-    m = marker.replace("'", "'\"'\"'")
+    note = (
+        f"[attnroute] output capped: %s of %s chars shown (head {HEAD_CHARS} + tail "
+        f"{TAIL_CHARS}). Full output: {out_path} -- Read it, or re-run with '# {ESCAPE}' "
+        f"to see everything."
+    ).replace("'", "'\"'\"'")
     show = (
         "__ar_show() { __ar_rc=$?; "
         f"if [ -f {f} ]; then "
         f"__ar_n=$(wc -c < {f} | tr -d ' '); "
         f"if [ \"$__ar_n\" -gt {CAP_CHARS} ]; then "
-        f"__ar_h={HEAD_CHARS}; __ar_t={TAIL_CHARS}; "
-        f"head -c {HEAD_CHARS} {f}; printf '\\n...\\n{m}\\n...\\n'; tail -c {TAIL_CHARS} {f}; "
+        f"head -c {HEAD_CHARS} {f}; "
+        f"printf '\\n...\\n{note}\\n...\\n' \"{HEAD_CHARS + TAIL_CHARS}\" \"$__ar_n\"; "
+        f"tail -c {TAIL_CHARS} {f}; "
         f"else cat {f}; rm -f {f}; fi; fi; "
         "return $__ar_rc; }; "
         "trap '__ar_show' EXIT"
@@ -184,6 +224,7 @@ def handle(payload: dict) -> dict | None:
     try:
         d = outputs_dir()
         d.mkdir(parents=True, exist_ok=True)
+        sweep(d)
         digest = hashlib.sha256(f"{sid}\x1f{cmd}\x1f{os.getpid()}".encode()).hexdigest()
         name = f"{digest[:16]}.log"
         out_path = (d / name).as_posix()

@@ -64,6 +64,12 @@ class TestEligibility:
     def test_background_command_is_left_alone(self):
         assert oc.eligible("Bash", {"command": "sleep 9", "run_in_background": True})[0] is False
 
+    def test_a_command_with_its_own_trap_is_declined(self):
+        """A trap is not a stack: the command's EXIT trap would replace the one that prints the
+        captured output, and all of it would vanish with no marker."""
+        ok, why = oc.eligible("Bash", {"command": 'trap "rm -rf $t" EXIT; seq 1 4000'})
+        assert ok is False and "trap" in why
+
     def test_escape_marker_is_honoured(self):
         assert oc.eligible("Bash", {"command": "cat big.log  # attnroute:full"})[0] is False
 
@@ -134,6 +140,12 @@ class TestRewriteInARealShell:
         assert len(r.stdout) < 6000
         assert f.stat().st_size > 20000          # the full output is kept on disk
 
+    def test_marker_numbers_are_expanded_not_literal(self, tmp_path):
+        script, _ = self._wrapped("head -c 20000 /dev/zero | tr '\\0' 'x'", tmp_path)
+        out = _run(script, tmp_path).stdout
+        assert f"{oc.HEAD_CHARS + oc.TAIL_CHARS} of 20000 chars shown" in out
+        assert "$((" not in out and "$__ar_n" not in out
+
     def test_small_output_passes_through_whole_and_leaves_no_file(self, tmp_path):
         script, f = self._wrapped("echo hello", tmp_path)
         r = _run(script, tmp_path)
@@ -175,3 +187,23 @@ def test_registered_for_the_egress_suite():
     src = (os.path.join(os.path.dirname(__file__), "test_no_egress.py"))
     with open(src, encoding="utf-8") as fh:
         assert "attnroute.output_cap" in fh.read()
+
+
+class TestSweep:
+    def test_positive_control_old_outputs_are_removed(self, tmp_path):
+        old = tmp_path / "a.log"
+        old.write_text("x")
+        os.utime(old, (1, 1))
+        assert oc.sweep(tmp_path, now=10 * oc.OUTPUT_TTL_S) == 1 and not old.exists()
+
+    def test_fresh_outputs_are_kept(self, tmp_path):
+        f = tmp_path / "b.log"
+        f.write_text("x")
+        assert oc.sweep(tmp_path) == 0 and f.exists()
+
+    def test_count_is_bounded(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(oc, "OUTPUT_KEEP", 3)
+        for i in range(6):
+            (tmp_path / f"{i}.log").write_text("x")
+        oc.sweep(tmp_path)
+        assert len(list(tmp_path.glob("*.log"))) == 3
