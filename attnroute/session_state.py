@@ -150,7 +150,7 @@ def empty_state(session_id: str = "") -> dict:
             "handed_back": [], "transcript_offset": None, "window": 0,
             "facts": {}, "handbacks": 0, "ledger": [], "ledger_left": 0,
             "ledger_repeats": 0, "ledger_of": 0, "ledger_window": 0,
-            "compacted_at": [], "alerted_window": None}
+            "compacted_at": [], "alerted_window": None, "alerts_sent": 0}
 
 
 def set_team(state: dict, team: str) -> dict:
@@ -963,11 +963,59 @@ def compact_alert(state: dict, transcript_path, repo: Path | str = ".") -> dict:
 #:   that started compacting on its own judgement would be taking it.
 ALERT_TEXT = (
     "[attnroute] CONTEXT {now} of {limit} tokens ({pct} of autoCompactWindow, from "
-    "{source}). "
-    "Auto-compact will land wherever the count reaches the window -- possibly mid-task. Tell the "
-    "user, in one line, that this is a good moment to finish the current step and compact at a "
-    "break rather than have the boundary chosen for you. Do not compact anything yourself."
+    "{source}). Auto-compact will land wherever the count reaches the window -- possibly "
+    "mid-task, mid-refactor. FINISH THE STEP YOU ARE ON, bring it to a committable or "
+    "reportable state, then ask the user to run /compact before starting anything new. You "
+    "cannot compact yourself and neither can this hook, so the ask is the whole mechanism: "
+    "say it in one line and carry on. Do not abandon work in progress to compact sooner, and "
+    "do not start a long new task on this context."
 )
+
+
+def compaction_compliance(state: dict, limit_tokens=None) -> dict:
+    """Did this session act on its warnings? -> {"alerted", "early", "at_the_wall", "rate",
+    "why"}
+
+    ⚠⚠ THE SAVING FROM ITEM 3 IS CONTINGENT ON SESSIONS ACTUALLY ACTING, AND THIS IS THE
+       NUMBER THAT SAYS WHETHER THEY DID. The arithmetic is that the bill follows the MEAN
+       context, `(post-compact floor + trigger) / 2`, so moving the trigger from the window down
+       to the alert is worth something only if the trigger really moves. A nudge nobody acts on
+       saves nothing, and reporting the projected figure as achieved would be the reassuring
+       failure this programme exists to refuse.
+
+    ⚠⚠ IT NEEDED NO NEW INSTRUMENTATION, which is why item 3 is first. Two things were
+       already recorded: the context size at each compaction (`compacted_at`, written at
+       PreCompact) and the window an alert fired in (`alerted_window`). A compaction materially
+       BELOW the window was taken at a break; one AT the window is auto-compact arriving on its
+       own schedule. That difference is the whole measurement.
+
+    ⚠ AND "early" IS NOT "because of the alert". A session may compact early for its own
+      reasons, and the alert fires before the compaction either way, so this is an
+      ASSOCIATION over a population and not a cause for any single window. The control is the
+      unalerted windows in the same table; `why` says so in words, because a bare percentage
+      invites the stronger reading.
+    """
+    seen = [int(n) for n in (state.get("compacted_at") or []) if int(n or 0) > 0]
+    if not seen:
+        return {"alerted": 0, "early": 0, "at_the_wall": 0, "rate": None,
+                "why": "no compaction has been observed in this session yet"}
+    limit = int(limit_tokens or 0)
+    if limit <= 0:
+        return {"alerted": 0, "early": 0, "at_the_wall": 0, "rate": None,
+                "why": "no autoCompactWindow is known, so early and at-the-wall cannot be "
+                       "told apart"}
+    # A compaction at or above the alert threshold is the wall arriving; one below it is a
+    # session that stopped early. The threshold is the same ALERT_AT the warning uses, so the
+    # two cannot drift apart into a measurement of a different thing.
+    threshold = int(limit * ALERT_AT)
+    early = [n for n in seen if n < threshold]
+    wall = [n for n in seen if n >= threshold]
+    alerted = int(state.get("alerts_sent", 0))
+    rate = len(early) / len(seen)
+    return {"alerted": alerted, "early": len(early), "at_the_wall": len(wall), "rate": rate,
+            "why": f"{len(early)} of {len(seen)} observed compaction(s) happened below "
+                   f"{threshold:,} tokens, {alerted} alert(s) sent -- association over a "
+                   f"population, not a cause for any one window"}
 
 
 def nudge_due(state: dict) -> dict:
@@ -1148,6 +1196,9 @@ def hook(payload: dict, repo: Path | str = ".") -> dict | None:
         due = nudge_due(state)
         if alert["due"]:
             state["alerted_window"] = int(state.get("window", 0))
+            # The denominator for `compaction_compliance`. Without it the early/at-the-wall
+            # split has no idea how many warnings it is the response to.
+            state["alerts_sent"] = int(state.get("alerts_sent", 0)) + 1
             _emit("compact_alert", payload, why=alert["why"])
             out = {"hookSpecificOutput": {"hookEventName": "Stop",
                                           "additionalContext": alert["text"]}}

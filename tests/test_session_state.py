@@ -282,14 +282,108 @@ class TestTheApproachingBoundaryAlert:
         assert "340,000" in out["text"] and "400,000" in out["text"]
         assert "settings.json" in out["text"], "a percentage without its denominator's source"
 
-    def test_it_asks_for_a_sentence_and_not_for_an_action(self, tmp_path, home):
-        """⚠ Whether a break is a good place to stop is the human's call. A hook that acted on
-        its own judgement here would be taking it."""
+    def test_it_asks_for_the_compaction_rather_than_only_reporting_the_number(
+            self, tmp_path, home):
+        """⚠⚠ THE ASK IS THE WHOLE MECHANISM, because nothing else in the loop can act.
+        Claude Code cannot be made to compact by a hook, and the human is not meant to be
+        watching a token counter -- so the only thing that can move the trigger below the window
+        is the session deciding to finish its step and request it. A warning that merely reports
+        a percentage leaves the boundary exactly where it was.
+        """
         project = settings(tmp_path / "p", autoCompactWindow=400000)
         path = transcript(tmp_path / "t.jsonl", [usage_line(340_000)])
         text = ss.compact_alert(ss.empty_state("s"), path, project)["text"]
-        assert "Tell the user" in text
-        assert "Do not compact anything yourself" in text
+        assert "/compact" in text, "it has to name the thing to ask for"
+        assert "FINISH THE STEP" in text
+
+    def test_it_does_not_ask_the_session_to_drop_what_it_is_doing(self, tmp_path, home):
+        """⚠⚠ THE FAILURE MODE OF THIS FEATURE IS THE ONE IT IS MEANT TO PREVENT. A warning
+        that reads as "compact now" would have sessions abandoning half-applied work at 80% to
+        avoid losing it at 100% -- the same interrupted refactor, arriving earlier and on
+        purpose. And it must not take the action itself: whether a break is a good place to stop
+        is a judgement about the work, which this hook knows nothing about.
+        """
+        project = settings(tmp_path / "p", autoCompactWindow=400000)
+        path = transcript(tmp_path / "t.jsonl", [usage_line(340_000)])
+        text = ss.compact_alert(ss.empty_state("s"), path, project)["text"]
+        assert "Do not abandon work in progress" in text
+        assert "cannot compact yourself" in text
+        # And it must not invite the opposite error either: starting a long new task on a
+        # context that is 80% spent guarantees the boundary lands inside it. A mutation that
+        # replaced this clause with "start something else instead" passed every other check.
+        assert "do not start a long new task" in text.lower()
+
+
+class TestWhetherSessionsActuallyCompactEarly:
+    """⚠⚠ THE SAVING FROM THE ASK IS CONTINGENT, AND THIS IS WHERE THAT IS ADMITTED. The
+    bill follows mean context, `(floor + trigger)/2`, so moving the trigger from 400k to 320k is
+    worth about 18% of mean context -- IF the trigger really moves. A nudge nobody acts on saves
+    nothing, and the projected figure must never be reported as achieved.
+
+    It needed no new instrumentation, which is why this was the first item built: the context at
+    each compaction was already recorded at PreCompact, and the window an alert fired in was
+    already recorded too.
+    """
+
+    def _state(self, points, alerts=0):
+        st = ss.empty_state("s")
+        st["compacted_at"] = list(points)
+        st["alerts_sent"] = alerts
+        return st
+
+    def test_a_compaction_below_the_threshold_is_early(self):
+        out = ss.compaction_compliance(self._state([250_000], alerts=1), 400_000)
+        assert (out["early"], out["at_the_wall"]) == (1, 0)
+        assert out["rate"] == 1.0
+
+    def test_a_compaction_at_the_window_is_the_wall_arriving(self):
+        out = ss.compaction_compliance(self._state([399_000], alerts=1), 400_000)
+        assert (out["early"], out["at_the_wall"]) == (0, 1)
+        assert out["rate"] == 0.0
+
+    def test_the_threshold_is_the_same_one_the_alert_uses(self):
+        """⚠⚠ OTHERWISE THE TWO DRIFT INTO MEASURING DIFFERENT THINGS. If the warning fires
+        at 80% and compliance is scored against, say, 90%, then a session that did exactly what
+        it was asked would be counted as having ignored the warning -- and the report would show
+        a nudge that does not work, with nothing wrong but the arithmetic."""
+        limit = 400_000
+        just_under = int(limit * ss.ALERT_AT) - 1
+        just_over = int(limit * ss.ALERT_AT) + 1
+        assert ss.compaction_compliance(self._state([just_under]), limit)["early"] == 1
+        assert ss.compaction_compliance(self._state([just_over]), limit)["at_the_wall"] == 1
+
+    def test_with_no_window_known_it_refuses_to_score(self):
+        """⚠ Early and at-the-wall are both relative to the window. Without one, a percentage
+        would be a number with no condition attached -- and it would print identically to a real
+        one."""
+        out = ss.compaction_compliance(self._state([300_000]), None)
+        assert out["rate"] is None
+        assert "autoCompactWindow" in out["why"]
+
+    def test_with_no_compaction_yet_it_says_so(self):
+        out = ss.compaction_compliance(ss.empty_state("s"), 400_000)
+        assert out["rate"] is None
+        assert "no compaction" in out["why"]
+
+    def test_the_why_refuses_the_causal_reading(self):
+        """⚠⚠ "early" IS NOT "BECAUSE OF THE ALERT". The alert precedes every compaction in
+        an alerted window, so the ordering proves nothing; a session may compact early for its
+        own reasons. The figure is an association over a population, the control is the
+        unalerted windows, and the sentence has to say so -- a bare percentage invites the
+        stronger reading and that is how a nudge gets credited with a saving it did not cause."""
+        out = ss.compaction_compliance(self._state([250_000, 399_000], alerts=2), 400_000)
+        assert "association over a population" in out["why"]
+        assert "not a cause" in out["why"]
+
+    def test_the_alerts_sent_counter_is_the_denominator(self, tmp_path, home):
+        """Without it the early/at-the-wall split has no idea how many warnings it is the
+        response to -- and a 100% rate over zero alerts would read as a triumph."""
+        project = settings(tmp_path / "p", autoCompactWindow=400000)
+        path = transcript(tmp_path / "t.jsonl", [usage_line(340_000)])
+        ss.hook({"hook_event_name": "Stop", "session_id": "s-compliance",
+                 "transcript_path": str(path), "cwd": str(project)}, repo=project)
+        assert ss.load("s-compliance")["alerts_sent"] == 1
+
 
     def test_it_speaks_once_per_window(self, tmp_path, home):
         project = settings(tmp_path / "p", autoCompactWindow=400000)
