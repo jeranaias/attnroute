@@ -54,7 +54,11 @@ def emit(component: str, event: str, *, session_id=None, agent_id=None, arm=None
     if "team" not in fields:
         try:
             from attnroute.team import current as _team
-            found = _team()
+            # ⚠ THE SESSION ID IS PASSED, because a team declared with `attnroute team set`
+            #   lives in that session's state and cannot be found without it. Resolving the
+            #   team from the cwd alone is what produced `team=null` on every row from the
+            #   shared machine: twenty live sessions, all started in one directory.
+            found = _team(session_id=session_id)
             rec["team"] = found.get("team")
             rec["team_source"] = found.get("source")
         except Exception:                  # noqa: BLE001 - a label must not cost a turn
