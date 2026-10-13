@@ -142,3 +142,82 @@ class TestTheAllocationTravelsWithTheDecision:
         monkeypatch.setenv(oc.HOLDOUT_ENV, "50")
         late = oc.arm_for("s", "c")
         assert (early["holdout_pct"], late["holdout_pct"]) == (10, 50)
+
+
+#: A lone surrogate, as a Bash command can carry one: Windows paths and terminal input reach the
+#: hook payload through JSON, which represents them this way.
+LONE_SURROGATE = "echo \ud83d and on"
+
+
+class TestTheBucketSurvivesInputItDidNotExpect:
+    """⚠⚠ FOUND IN NINE DAYS OF LIVE TELEMETRY, NOT IN REVIEW: 85 `UnicodeEncodeError` rows
+    from `output_cap` on the shared machine, every one a turn that got NO arm and NO decision.
+    The saving tables did not show an error -- they showed fewer rows, over a population quietly
+    smaller than the one being reported on, with the failures filed under an event nothing reads.
+
+    That is the shape this programme keeps refusing: not a wrong number, but a right number over
+    the inputs that happened to work.
+    """
+
+    def test_a_lone_surrogate_in_a_command_still_gets_an_arm(self):
+        out = oc.arm_for("s", LONE_SURROGATE)
+        assert out["arm"] in ("cap", "held-out")
+        assert 0 <= out["bucket"] < 100
+
+    def test_a_lone_surrogate_in_a_read_key_still_gets_an_arm(self):
+        assert rl.holdout("s", LONE_SURROGATE, 1)["arm"]
+
+    def test_it_is_deterministic_for_that_input_too(self):
+        """An arm that moved between two calls would make the decision unreproducible, which is
+        the one thing the logged bucket exists to prevent."""
+        assert (oc.arm_for("s", LONE_SURROGATE)["bucket"]
+                == oc.arm_for("s", LONE_SURROGATE)["bucket"])
+
+    def test_two_commands_differing_only_in_surrogates_stay_distinct(self):
+        """⚠⚠ THE CHECK THAT CHOOSES `surrogatepass` OVER `replace`, and without it that
+        choice was a comment with nothing behind it: a mutation to `replace` passed every other
+        test here, because for ordinary strings the two encoders are byte-identical. `replace`
+        folds every unencodable character into one codepoint, so these two distinct commands
+        would share a bucket and one of them would be allocated by the other's coin toss."""
+        a = oc.arm_for("s", "echo \ud83d x")
+        b = oc.arm_for("s", "echo \ud83c x")
+        assert a["bucket"] != b["bucket"]
+
+
+class TestTheSplitDoesNotMove:
+    """⚠⚠ THE ARMS ARE FROZEN, AND THIS IS WHAT KEEPS THEM SO. A trial compares a treated
+    arm against a held-out one over weeks of telemetry. Anything that changes the hash, the seed,
+    the separator or the encoding re-randomises which commands were in which arm -- and every row
+    already written then refers to an allocation that no longer exists. Nothing would look
+    broken: the tables would still show two arms and a difference between them.
+
+    `surrogatepass` was chosen over `replace` partly for this: for any string without surrogates
+    the two produce identical bytes, so the fix moved nothing. These values are the proof rather
+    than the argument.
+    """
+
+    @pytest.mark.parametrize("session,command,bucket", [
+        ("s1", "git status", 94),
+        ("s1", "pytest -q", 23),
+        ("abc", "cd /c/mw && ls", 69),
+        ("z", "", 29),
+    ])
+    def test_known_commands_keep_their_bucket(self, session, command, bucket):
+        assert oc.arm_for(session, command)["bucket"] == bucket
+
+    @pytest.mark.parametrize("session,key,turn,file_bucket,turn_bucket", [
+        ("s1", "nav/heading.py", 1, 13, 95),
+        ("abc", "docs/TRACKER.md", 7, 61, 47),
+    ])
+    def test_known_reads_keep_their_buckets(self, session, key, turn, file_bucket,
+                                            turn_bucket):
+        """⚠⚠ THE BUCKET IS FROZEN HERE, NOT THE ARM, AND THE FIRST VERSION OF THIS TEST GOT
+        IT WRONG. An arm is a function of the bucket AND the holdout percentage, so freezing the
+        arm freezes two independent things in one assertion -- and then it fails, or passes, for
+        either reason without saying which. It caught me out at once: the same call returns
+        `held-out-file` under this machine's `ATTNROUTE_LEDGER_HOLDOUT_PCT=50` and `ledger` under
+        the default 10, with the bucket identical at 13 both times. The bucket is the allocation;
+        the percentage is a dial that is meant to be turned."""
+        out = rl.holdout(session, key, turn)
+        assert out["file_bucket"] == file_bucket
+        assert out["turn_bucket"] == turn_bucket
