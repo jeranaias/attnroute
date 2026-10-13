@@ -149,7 +149,8 @@ def empty_state(session_id: str = "") -> dict:
     return {"version": STATE_VERSION, "session": session_id, "notes": [],
             "handed_back": [], "transcript_offset": None, "window": 0,
             "facts": {}, "handbacks": 0, "ledger": [], "ledger_left": 0,
-            "ledger_repeats": 0, "ledger_of": 0, "ledger_window": 0}
+            "ledger_repeats": 0, "ledger_of": 0, "ledger_window": 0,
+            "compacted_at": [], "alerted_window": None}
 
 
 def load(session_id: str) -> dict:
@@ -786,6 +787,163 @@ NUDGE_AFTER_EDITS = 6
 NUDGE_EVERY_TURNS = 25
 
 
+# ═══ THE APPROACHING-BOUNDARY ALERT ══════════════════════════════
+#
+# ⚠⚠ WHY A WARNING AND NOT A SAVING. Auto-compact arrives wherever the token count happens to
+#    reach the window -- in the middle of a half-applied refactor as readily as at a natural
+#    break. The handback above is what makes that survivable, and it is 1,500 tokens against a
+#    window of hundreds of thousands: most of what the session knows still goes. A human who
+#    knows the boundary is close can take it at a break instead, which costs nothing and loses
+#    much less. This fires once per window and then shuts up.
+#
+# ⚠⚠ AND IT REFUSES TO GUESS THE DENOMINATOR. 80% OF WHAT is the whole question. If
+#    `autoCompactWindow` is not configured, this does NOT fall back to a plausible-looking
+#    default: a percentage of an invented window is a number with no condition attached, and it
+#    would read exactly like a measured one. It falls back to where compaction has ACTUALLY
+#    happened in this session, which is observed rather than assumed, and if that is unknown too
+#    it says so and names the setting that would fix it. A warning that cannot say what it is a
+#    warning about is worse than silence, because silence does not get believed.
+
+#: Fraction of the window at which to speak. Deliberately not 0.95 -- see `context_tokens`: the
+#: figure available to a hook is the context the LAST request carried, so the turn that actually
+#: crosses the line is the turn that never got a warning. The margin is the one turn of slack.
+ALERT_AT = 0.80
+
+#: Bytes of transcript tail read to find the last usage block. Bounded because this runs on a
+#: hook: the Stop path once re-parsed 300 MB from byte zero and cost 15 s.
+USAGE_TAIL_BYTES = 262_144
+
+#: Where `autoCompactWindow` is read from, nearest first. Claude Code resolves project settings
+#: over user settings, and this follows that order rather than inventing one.
+SETTINGS_FILES = (".claude/settings.local.json", ".claude/settings.json")
+
+
+def auto_compact_window(state: dict, repo: Path | str = ".") -> dict:
+    """The token count a compaction will happen at. -> {"tokens", "source", "why"}
+
+    `tokens` is None when nothing measured or configured says what it is, and then `why` says
+    which setting would answer it. Never a default.
+    """
+    for name in SETTINGS_FILES:
+        path = Path(str(repo)) / name
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            found = int(data["autoCompactWindow"])
+        except Exception:                        # noqa: BLE001 - absent, unreadable, not an int
+            continue
+        if found > 0:
+            return {"tokens": found, "source": name, "why": f"{name} sets it to {found:,}"}
+    try:
+        data = json.loads((Path.home() / ".claude" / "settings.json")
+                          .read_text(encoding="utf-8"))
+        found = int(data["autoCompactWindow"])
+        if found > 0:
+            return {"tokens": found, "source": "~/.claude/settings.json",
+                    "why": f"~/.claude/settings.json sets it to {found:,}"}
+    except Exception:                            # noqa: BLE001
+        pass
+
+    # ⚠⚠ OBSERVED, NOT ASSUMED. The context size recorded at this session's own PreCompact
+    #    events: where compaction has actually happened here. The SMALLEST is used, because the
+    #    alert's job is to arrive before the boundary does and the earliest observed boundary is
+    #    the only one that guarantees that.
+    seen = [int(n) for n in (state.get("compacted_at") or []) if int(n or 0) > 0]
+    if seen:
+        return {"tokens": min(seen), "source": "observed",
+                "why": f"no autoCompactWindow setting found; this session has compacted at "
+                       f"{min(seen):,} tokens"}
+    return {"tokens": None, "source": None,
+            "why": "no autoCompactWindow in settings and no compaction observed yet in this "
+                   "session, so there is no denominator to be a percentage of"}
+
+
+def context_tokens(transcript_path) -> dict:
+    """How much context the last request carried. -> {"tokens", "why"}
+
+    ⚠⚠ THIS IS THE LAST REQUEST, NOT THE NEXT ONE, AND THE DIFFERENCE IS THE POINT. A hook
+       can only read what has already been written, so the figure is one turn stale -- and the
+       turn that crosses the window is therefore the turn that gets no warning. `ALERT_AT` leaves
+       a margin for exactly that; it is not caution for its own sake.
+
+    ⚠ CACHE READS COUNT. They are context: a request carrying 300,000 cached tokens is 300,000
+      tokens into the window. BurnRate shipped with them excluded and hid up to 95% of real usage
+      (CHANGELOG 1.0.2); the same mistake here would put the alert off by the same factor.
+    """
+    try:
+        path = Path(str(transcript_path or ""))
+        size = path.stat().st_size
+        start = max(0, size - USAGE_TAIL_BYTES)
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            raw = fh.read()
+    except OSError as exc:
+        return {"tokens": None, "why": f"transcript unreadable: {exc.__class__.__name__}"}
+    lines = raw.decode("utf-8", "replace").splitlines()
+    # ⚠ CONDITIONED ON THE READ HAVING STARTED MID-FILE, not on the file being large. The
+    #   first line is a fragment only because the seek landed inside one; keying this on the
+    #   SIZE instead says the same thing in the one case that occurs and something false in
+    #   every other -- and it masked a mutation, which is how it was found: unbounding the read
+    #   left the test green, because this line then threw away the very block being looked for.
+    if start and lines:
+        lines = lines[1:]
+    for line in reversed(lines):
+        if '"usage"' not in line:
+            continue
+        try:
+            usage = (json.loads(line).get("message") or {}).get("usage") or {}
+            total = (int(usage.get("input_tokens", 0))
+                     + int(usage.get("cache_read_input_tokens", 0))
+                     + int(usage.get("cache_creation_input_tokens", 0)))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if total > 0:
+            return {"tokens": total, "why": "from the last usage block in the transcript"}
+    return {"tokens": None,
+            "why": f"no usage block in the last {USAGE_TAIL_BYTES:,} bytes of transcript"}
+
+
+def compact_alert(state: dict, transcript_path, repo: Path | str = ".") -> dict:
+    """Should this Stop warn that the boundary is close? -> {"due", "text", "why"}
+
+    ⚠ ONCE PER WINDOW. The condition stays true for every remaining turn of the window, so a
+      per-turn warning would be noise on precisely the turns that are already expensive -- and
+      noise on every turn is what this whole package exists to remove.
+    """
+    window = int(state.get("window", 0))
+    if state.get("alerted_window") == window:
+        return {"due": False, "text": "", "why": "already warned in this window"}
+    limit = auto_compact_window(state, repo)
+    if not limit["tokens"]:
+        return {"due": False, "text": "", "why": limit["why"]}
+    now = context_tokens(transcript_path)
+    if not now["tokens"]:
+        return {"due": False, "text": "", "why": now["why"]}
+    threshold = int(limit["tokens"] * ALERT_AT)
+    if now["tokens"] < threshold:
+        return {"due": False, "text": "",
+                "why": f"{now['tokens']:,} of {limit['tokens']:,} "
+                       f"({now['tokens'] / limit['tokens']:.0%}), under {threshold:,}"}
+    return {"due": True, "why": f"{now['tokens']:,} of {limit['tokens']:,} "
+                                f"({now['tokens'] / limit['tokens']:.0%})",
+            "text": ALERT_TEXT.format(now=f"{now['tokens']:,}",
+                                      limit=f"{limit['tokens']:,}",
+                                      pct=f"{now['tokens'] / limit['tokens']:.0%}",
+                                      source=limit["source"])}
+
+
+#: ⚠ IT NAMES THE NUMBERS AND WHERE THE LIMIT CAME FROM. "Context is getting large" is a
+#:   feeling; a reader cannot check it or decide on it. And it tells the model to SAY SOMETHING
+#:   rather than to act: whether a break is a good place to stop is the human's call, and a hook
+#:   that started compacting on its own judgement would be taking it.
+ALERT_TEXT = (
+    "[attnroute] CONTEXT {now} of {limit} tokens ({pct} of autoCompactWindow, from "
+    "{source}). "
+    "Auto-compact will land wherever the count reaches the window -- possibly mid-task. Tell the "
+    "user, in one line, that this is a good moment to finish the current step and compact at a "
+    "break rather than have the boundary chosen for you. Do not compact anything yourself."
+)
+
+
 def nudge_due(state: dict) -> dict:
     """Should this Stop carry a reminder? -> {"due", "why"}
 
@@ -908,6 +1066,12 @@ def hook(payload: dict, repo: Path | str = ".") -> dict | None:
 
     if event == "PreCompact":
         derive_facts(state, payload.get("transcript_path"))
+        # ⚠ WHERE COMPACTION ACTUALLY HAPPENS, recorded because it is the only honest
+        #   denominator available when `autoCompactWindow` is not configured -- see
+        #   `auto_compact_window`. Bounded, like everything else kept in this file.
+        here = context_tokens(payload.get("transcript_path"))["tokens"]
+        if here:
+            state["compacted_at"] = ([*(state.get("compacted_at") or []), here])[-8:]
         state["window"] = int(state.get("window", 0)) + 1
 
     elif event == "SessionStart" and str(payload.get("source") or "") in HANDBACK_SOURCES:
@@ -947,8 +1111,21 @@ def hook(payload: dict, repo: Path | str = ".") -> dict | None:
     elif event == "Stop":
         derive_facts(state, payload.get("transcript_path"))
         state["turns_since_nudge"] = int(state.get("turns_since_nudge", 0)) + 1
+        # ⚠⚠ THE BOUNDARY WARNING OUTRANKS THE NOTE NUDGE, AND ONLY ONE OF THEM SPEAKS.
+        #    `additionalContext` is one string; two messages in it compete for the same attention
+        #    and the nudge would be the one acted on, being the easier instruction. A note that
+        #    goes unwritten for another 25 turns costs a note. A boundary that lands mid-task
+        #    costs the window. The nudge keeps its turn counter either way, so it is deferred and
+        #    not skipped.
+        alert = compact_alert(state, payload.get("transcript_path"),
+                              repo=payload.get("cwd") or repo)
         due = nudge_due(state)
-        if due["due"]:
+        if alert["due"]:
+            state["alerted_window"] = int(state.get("window", 0))
+            _emit("compact_alert", payload, why=alert["why"])
+            out = {"hookSpecificOutput": {"hookEventName": "Stop",
+                                          "additionalContext": alert["text"]}}
+        elif due["due"]:
             edits = sum(int(n) for n in (state.get("facts", {}).get("edited") or {}).values())
             state["turns_since_nudge"] = 0
             _emit("nudge", payload, edits=edits, why=due["why"])
