@@ -67,6 +67,80 @@ def tool_result(text):
         {"type": "tool_result", "tool_use_id": "t1", "content": text}]}}
 
 
+class TestThePullRequestsThisWindowTouched:
+    """⚠ WHY THIS EXISTS. With `autoCompactWindow` at 400,000 instead of 1,000,000, a window
+    boundary arrives roughly 2.8x as often, so whatever the handback drops is paid for 2.8x as
+    often. "What did I leave open" was costing a `gh pr list` after every compaction -- and once
+    cost worse than that: the GitHub account is shared between seats, so `--author @me` returned
+    four other teams' pull requests and they were briefly reported as this seat's.
+    """
+
+    def test_a_pr_url_in_tool_output_is_carried_over(self, tmp_path):
+        path = transcript(tmp_path / "t.jsonl", [
+            tool_result("https://github.com/Lanchester-Industries/meridian/pull/1872"),
+        ])
+        state = ss.empty_state("s")
+        facts = ss.derive_facts(state, path)
+        assert facts["prs"] == ["1872"]
+
+    def test_the_handback_says_the_state_was_not_checked(self, repo, tmp_path):
+        """⚠⚠ THE LINE THAT KEEPS IT HONEST. These numbers were SEEN; one may have merged
+        since. A handback that said "open PRs" would assert a live fact from a stale
+        observation, and a merged PR reported as open is exactly how a session pushes to a dead
+        branch -- which happened twice on the Meridian programme in one week."""
+        path = transcript(tmp_path / "t.jsonl", [
+            tool_result("https://github.com/x/y/pull/1855"),
+        ])
+        state = ss.empty_state("s")
+        ss.derive_facts(state, path)
+        text = ss.handback(state, repo=repo)["text"]
+        assert "#1855" in text
+        assert "NOT checked" in text
+
+    def test_prose_about_a_pr_is_not_a_pr_this_window_touched(self, tmp_path):
+        """⚠ Nothing is inferred from prose -- the module's own rule. A number this session
+        merely TALKED about is not a pull request it touched, and handing one over as though it
+        were is the guess this module refuses to make."""
+        path = transcript(tmp_path / "t.jsonl", [
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text",
+                 "text": "I think https://github.com/x/y/pull/999 is probably the right one"}]}},
+        ])
+        state = ss.empty_state("s")
+        facts = ss.derive_facts(state, path)
+        assert facts.get("prs") == []
+
+    def test_the_same_pr_seen_twice_is_listed_once(self, tmp_path):
+        path = transcript(tmp_path / "t.jsonl", [
+            tool_result("https://github.com/x/y/pull/42"),
+            tool_result("https://github.com/x/y/pull/42 again, "
+                        "and https://github.com/x/y/pull/43"),
+        ])
+        state = ss.empty_state("s")
+        facts = ss.derive_facts(state, path)
+        assert facts["prs"] == ["42", "43"]
+
+    def test_a_bare_pull_path_without_a_scheme_is_not_a_url(self, tmp_path):
+        """⚠ My first draft of the test above wrote `/pull/43` and expected it to
+        count. It does not, and should not: the pattern requires a scheme so that a
+        path fragment in prose cannot become a pull request this window touched. The
+        test failed, which is the pattern being stricter than the test author."""
+        path = transcript(tmp_path / "t.jsonl", [
+            tool_result("see /pull/99 for the rest"),
+        ])
+        state = ss.empty_state("s")
+        assert ss.derive_facts(state, path).get("prs") == []
+
+    def test_it_is_bounded_so_it_cannot_eat_the_budget(self, tmp_path):
+        """A long window can touch many PRs; the handback has 1,500 tokens for everything."""
+        path = transcript(tmp_path / "t.jsonl", [
+            tool_result(" ".join("https://github.com/x/y/pull/%d" % i for i in range(40))),
+        ])
+        state = ss.empty_state("s")
+        facts = ss.derive_facts(state, path)
+        assert len(facts["prs"]) == 6
+
+
 class TestWhatSurvivesAWindowBoundary:
 
     def test_a_live_note_is_handed_back_every_window(self, repo):
