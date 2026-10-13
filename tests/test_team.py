@@ -251,6 +251,29 @@ class TestEveryStreamRecordCarriesTheTeam:
         assert rec["team_source"] == "none"
         tm._CACHE.clear()
 
+    def test_a_team_the_session_DECLARED_reaches_the_record(self, tmp_path, monkeypatch):
+        """⚠⚠ THE END-TO-END PROPERTY, AND THE ONLY REASON THE BRANCH EXISTS. `emit` knows
+        the session id; the resolver needs it to find a declared team. Nothing covered this, so
+        dropping `session_id=` from that one call left every other test green while putting
+        `team: null` back on every row from the shared machine -- which is the state this work
+        set out to fix.
+        """
+        from attnroute import telemetry_stream as ts
+
+        monkeypatch.delenv(tm.TEAM_ENV, raising=False)
+        monkeypatch.setattr(tm, "map_path", lambda: tmp_path / "nope.json")
+        monkeypatch.setattr(ts.Path, "home", staticmethod(lambda: tmp_path))
+        sessions = tmp_path / ".claude" / "attn_state" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "s9.json").write_text(json.dumps({"team": "T6"}), encoding="utf-8")
+        monkeypatch.setattr(tm.Path, "home", staticmethod(lambda: tmp_path))
+        tm._CACHE.clear()
+        ts.emit("session_state", "handback", session_id="s9", acting=False)
+        rec = json.loads(ts.stream_path().read_text(encoding="utf-8").splitlines()[0])
+        assert rec["team"] == "T6"
+        assert rec["team_source"] == "session"
+        tm._CACHE.clear()
+
     def test_a_caller_may_still_override_it(self, tmp_path, monkeypatch):
         """`emit(..., team=...)` keeps working: the automatic value is a floor, not a lock."""
         from attnroute import telemetry_stream as ts
@@ -349,3 +372,103 @@ class TestBothSidesAreResolvedTheSameWay:
         src = Path(tm.__file__).read_text(encoding="utf-8")
         assert "key = _resolve(prefix)" in src
         assert "key = _normalise(prefix)" not in src
+
+
+class TestASessionCanSayWhichTeamItIs:
+    """⚠⚠ MEASURED BEFORE IT WAS BUILT, on jeranaias 2026-10-13: the mapping file held 128
+    prefixes, every one of them a real directory, and NOT ONE was the cwd of a live session.
+    Every team session there starts in `C:/Users/Jesse` and `cd`s into its worktree per command,
+    so all twenty live sessions -- eleven over 90 MB, touched that day -- resolved to team=None.
+    The mapping was not missing entries. It keyed the directory a session runs in, and every
+    session runs in the same one, so it looked complete while answering a question nobody asked.
+
+    The two that matter most here:
+
+      * a DECLARED team outranks a MAPPED one, because one is the session's statement about
+        itself and the other is an inference from where it happens to be sitting;
+      * and the ENVIRONMENT still outranks both, so a session that has been told who it is
+        cannot be relabelled by its own state file.
+    """
+
+    def test_a_declared_team_is_used(self, tmp_path):
+        state_dir = tmp_path / "sessions"
+        state_dir.mkdir()
+        (state_dir / "s1.json").write_text(json.dumps({"team": "T4"}), encoding="utf-8")
+        out = tm.team_for(cwd="C:/nowhere/at/all", env={}, map_file=tmp_path / "none.json",
+                          session_id="s1", state_dir=state_dir)
+        assert out["team"] == "T4"
+        assert out["source"] == "session", "the source says it was declared, not inferred"
+
+    def test_it_outranks_the_mapping(self, tmp_path):
+        """⚠ A statement beats an inference. The session is sitting inside a mapped worktree
+        and still says it is T4; attributing it to T1 would file one team's work under
+        another's name, which is the harm this whole module is built around."""
+        state_dir = tmp_path / "sessions"
+        state_dir.mkdir()
+        (state_dir / "s1.json").write_text(json.dumps({"team": "T4"}), encoding="utf-8")
+        map_file = tmp_path / "teams.json"
+        map_file.write_text(json.dumps({str(tmp_path / "wt"): "T1"}), encoding="utf-8")
+        out = tm.team_for(cwd=str(tmp_path / "wt"), env={}, map_file=map_file,
+                          session_id="s1", state_dir=state_dir)
+        assert out["team"] == "T4"
+
+    def test_the_environment_outranks_a_declaration(self, tmp_path):
+        state_dir = tmp_path / "sessions"
+        state_dir.mkdir()
+        (state_dir / "s1.json").write_text(json.dumps({"team": "T4"}), encoding="utf-8")
+        out = tm.team_for(cwd=".", env={tm.TEAM_ENV: "T9"}, session_id="s1",
+                          state_dir=state_dir)
+        assert out["team"] == "T9"
+        assert out["source"] == "env"
+
+    def test_no_session_id_means_no_declaration(self, tmp_path):
+        """⚠⚠ AND THE STRAY FILES ARE REALLY THERE, which the first version of this test
+        missed. It asserted against an empty directory, so defaulting the session id to some
+        literal name was inert and the mutation that did exactly that stayed green -- a check
+        that could not fire. `x.json` is the specific hazard: `session_state.state_path` writes
+        that name when the session id is empty, so a resolver that defaulted instead of
+        refusing would read one unnamed session's label onto every other."""
+        state_dir = tmp_path / "sessions"
+        state_dir.mkdir()
+        for name in ("x", "s1", "session"):
+            (state_dir / f"{name}.json").write_text(json.dumps({"team": "T4"}),
+                                                    encoding="utf-8")
+        assert tm.declared_team(None, state_dir) == ""
+        assert tm.declared_team("", state_dir) == ""
+        assert tm.declared_team("   ", state_dir) == ""
+        assert tm.declared_team("s1", state_dir) == "T4", "positive control"
+
+    def test_an_unreadable_state_file_is_not_a_declaration(self, tmp_path):
+        """⚠ Resolving a team runs on a hook path, so every failure here is "not declared"
+        rather than an exception: a label must never cost the user their turn."""
+        state_dir = tmp_path / "sessions"
+        state_dir.mkdir()
+        (state_dir / "s1.json").write_text("{not json", encoding="utf-8")
+        assert tm.declared_team("s1", state_dir) == ""
+        (state_dir / "s2.json").write_text(json.dumps({"team": 7}), encoding="utf-8")
+        assert tm.declared_team("s2", state_dir) == ""
+        (state_dir / "s3.json").write_text(json.dumps({"team": "  "}), encoding="utf-8")
+        assert tm.declared_team("s3", state_dir) == ""
+
+    def test_the_why_names_the_way_out_when_nothing_is_known(self, tmp_path):
+        """⚠⚠ ON THE SHARED MACHINE THIS IS THE EXPECTED MESSAGE, NOT A MISCONFIGURATION,
+        and that is why it has to name the remedy. A diagnostic that says only "no prefix
+        matches" sends the reader to edit a mapping file that cannot answer the question."""
+        map_file = tmp_path / "teams.json"
+        map_file.write_text(json.dumps({str(tmp_path / "elsewhere"): "T1"}), encoding="utf-8")
+        out = tm.team_for(cwd=str(tmp_path), env={}, map_file=map_file)
+        assert out["team"] is None
+        assert "team set" in out["why"]
+        assert tm.TEAM_ENV in out["why"]
+
+    def test_the_cache_does_not_serve_one_session_another_answer(self, monkeypatch):
+        """The cache key used to be the cwd alone, which was right while the cwd was all that
+        was consulted. One hook process asking about two sessions would then have been handed
+        the first answer twice -- and on this fleet every session shares a cwd, so the key
+        would have been identical for all of them."""
+        monkeypatch.setattr(tm, "_CACHE", {})
+        monkeypatch.delenv(tm.TEAM_ENV, raising=False)
+        monkeypatch.setattr(tm, "declared_team",
+                            lambda sid, state_dir=None: {"a": "T4", "b": "T6"}.get(sid, ""))
+        assert tm.current(session_id="a")["team"] == "T4"
+        assert tm.current(session_id="b")["team"] == "T6", "the cwd alone is not the key"

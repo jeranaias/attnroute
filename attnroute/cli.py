@@ -631,6 +631,60 @@ def cmd_state(args):
     return 0
 
 
+def cmd_team(args):
+    """Say which team this session is, or show what attnroute currently thinks.
+
+    ⚠⚠ WHY A COMMAND AND NOT A CONFIG FILE. On the shared machine every team session starts in
+      the same home directory and `cd`s into its worktree per command, so the cwd mapping --
+      128 prefixes, every one of them a real directory -- matched NONE of the twenty live
+      sessions. An environment variable is still the better vehicle at launch time, but it
+      needs a restart, and these sessions were already running with two gigabytes of
+      transcript between them.
+    """
+    from attnroute.session_state import load, save, session_from_env, set_team
+    from attnroute.team import current as team_current
+
+    session = args.session
+    if not session:
+        found = session_from_env()
+        if not found["session"]:
+            print(f"[attnroute] {found['why']}", file=sys.stderr)
+            return 1
+        session = found["session"]
+
+    if args.subcommand == "show":
+        found = team_current(session_id=session)
+        print(found["team"] if found["team"] else "(no team)")
+        print(f"[attnroute] source: {found['source']}"
+              + (f" -- {found['why']}" if found["why"] else ""), file=sys.stderr)
+        return 0 if found["team"] else 1
+
+    if not args.name:
+        print("[attnroute] `team set` needs a team name, e.g. T4", file=sys.stderr)
+        return 1
+    state = load(session)
+    out = set_team(state, args.name)
+    if out["team"] != " ".join(str(args.name).split()):
+        print(f"[attnroute] {out['why']}", file=sys.stderr)
+        return 1
+    save(session, state)
+    # ⚠ ECHOED BACK THROUGH THE RESOLVER, not from the write, so what is printed is what
+    #   telemetry will actually record -- including the case where ATTNROUTE_TEAM overrules it
+    #   and the operator would otherwise believe this command had taken effect.
+    found = team_current(session_id=session)
+    # The SESSION ID is printed, not just the team. `session_from_env` takes the first of
+    # CLAUDE_CODE_SESSION_ID and CLAUDE_SESSION_ID that is set, so setting the second one by
+    # hand while the first is exported writes the label to a DIFFERENT session -- which is
+    # how the author labelled the architect seat T4 while testing this command. A write that
+    # names its target makes that visible in the moment instead of in a report.
+    print(f"[attnroute] session {session}: this session is {out['team']}"
+          + (f" ({out['why']})" if out["why"] else ""), file=sys.stderr)
+    if found["team"] != out["team"]:
+        print(f"[attnroute] NOTE telemetry will record {found['team']!r} instead, from "
+              f"{found['source']}", file=sys.stderr)
+    return 0
+
+
 def cmd_board(args):
     """Read or publish a row on the shared team board.
 
@@ -910,6 +964,16 @@ For more information, visit: https://github.com/jeranaias/attnroute
     state_parser.add_argument("--repo", type=str, default=None)
     state_parser.add_argument("--json", action="store_true")
 
+    # team command
+    team_parser = subparsers.add_parser(
+        "team", help="Say which team this session is, or show what attnroute thinks")
+    team_parser.add_argument("subcommand", nargs="?", default="show",
+                             choices=["set", "show"])
+    team_parser.add_argument("name", nargs="?", default=None,
+                             help="The team name, e.g. T4 (set only)")
+    team_parser.add_argument("--session", type=str, default=None,
+                             help="Session id (default: $CLAUDE_SESSION_ID)")
+
     # board command
     board_parser = subparsers.add_parser(
         "board", help="Read or publish a row on the shared team board")
@@ -976,6 +1040,7 @@ For more information, visit: https://github.com/jeranaias/attnroute
         "diagnostic": cmd_diagnostic,
         "plugins": cmd_plugins,
         "board": cmd_board,
+        "team": cmd_team,
         "note": cmd_note,
         "state": cmd_state,
         "ingest": cmd_ingest,

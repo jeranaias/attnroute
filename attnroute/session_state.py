@@ -153,6 +153,32 @@ def empty_state(session_id: str = "") -> dict:
             "compacted_at": [], "alerted_window": None}
 
 
+def set_team(state: dict, team: str) -> dict:
+    """Record which team this session is. -> {"team", "why"}
+
+    ⚠⚠ THIS IS A STATEMENT, NOT A GUESS, WHICH IS THE ONLY REASON IT IS ALLOWED TO OUTRANK
+       THE MAPPING FILE. `attnroute.team` refuses to read a team out of a directory name
+       because that fails silently -- a renamed worktree files one team's work under another's
+       name and nothing looks wrong. A session saying "I am T4" has the same authority as the
+       environment variable saying it, and is recorded with `source: "session"` so a reader can
+       tell the two apart from an inference drawn from a path.
+
+    ⚠ NOT VALIDATED AGAINST A LIST OF KNOWN TEAMS, deliberately: there is no canonical list
+      in this repository, and inventing one here would refuse a new team on the day it is
+      created. The value is normalised and echoed back so a typo is visible at the moment it is
+      made rather than six weeks later in a report.
+    """
+    name = " ".join(str(team or "").split())
+    if not name:
+        return {"team": state.get("team"), "why": "a team name cannot be empty"}
+    if len(name) > 40:
+        return {"team": state.get("team"), "why": "that is a sentence, not a team name"}
+    before = state.get("team")
+    state["team"] = name
+    why = f"was {before}" if before and before != name else ""
+    return {"team": name, "why": why}
+
+
 def load(session_id: str) -> dict:
     try:
         state = json.loads(state_path(session_id).read_text(encoding="utf-8"))

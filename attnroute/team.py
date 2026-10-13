@@ -17,6 +17,26 @@ the filesystem folds it, and NOT on POSIX, where two spellings are two directori
 The environment variable still wins when it is set, because a session that has been told who
 it is should not be second-guessed by a path.
 
+═══ AND A SESSION CAN DECLARE ITS OWN TEAM, BECAUSE ON THE SHARED MACHINE THE CWD CANNOT
+═══
+
+Measured on jeranaias 2026-10-13: the mapping file held 128 prefixes, every one of them a real
+directory, and NOT ONE was the cwd of a live session. Every team session there starts in
+`C:/Users/Jesse` and `cd`s into its worktree per command, so all twenty live sessions -- eleven
+over 90 MB, touched that day -- resolved to `team=None`. Adding entries could not have helped:
+the mapping keys the directory a session runs in, and these sessions all run in the same one. It
+looked complete while answering a question nobody was asking.
+
+So `attnroute team set T4` records the team in that session's own state file, and `team_for`
+reads it. The order is ENV, then DECLARED, then MAPPED: the first two are statements by the
+session about itself, the third is an inference from where it happens to be sitting, and an
+inference should not overrule a statement.
+
+⚠ THE LAUNCH-TIME VEHICLE IS STILL `ATTNROUTE_TEAM`, and this does not replace it. What it
+  does is work for a session that is ALREADY RUNNING -- which, at the point this was written,
+  was twenty of them holding two gigabytes of transcript. Setting an environment variable would
+  have meant restarting every one.
+
 ═══ WHY A MAPPING AND NOT A HEURISTIC ══════════════════════════════════════════════════
 
 The obvious shortcut is to read the team out of the directory name -- find `t5` or `team-5`
@@ -158,7 +178,28 @@ def load_map(path=None) -> tuple:
     return out, ""
 
 
-def team_for(cwd=None, env=None, map_file=None) -> dict:
+def declared_team(session_id, state_dir=None) -> str:
+    """The team this session recorded for itself, or "". Never raises.
+
+    ⚠⚠ READ AS PLAIN JSON, NOT THROUGH `session_state`, AND NOT BECAUSE OF AN IMPORT CYCLE
+       ALONE. `session_state` imports this module, so the dependency has to run one way -- but
+       the stronger reason is that resolving a team must not depend on the rest of that module
+       loading, parsing or agreeing about its schema. One key is read, defensively, and anything
+       unexpected means "not declared" rather than an exception on a hook path.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return ""
+    base = Path(state_dir) if state_dir else Path.home() / ".claude" / "attn_state" / "sessions"
+    try:
+        raw = json.loads((base / f"{sid}.json").read_text(encoding="utf-8"))
+        found = raw.get("team") if isinstance(raw, dict) else None
+        return str(found).strip() if isinstance(found, str) and found.strip() else ""
+    except Exception:                     # noqa: BLE001 - a label must not cost a turn
+        return ""
+
+
+def team_for(cwd=None, env=None, map_file=None, session_id=None, state_dir=None) -> dict:
     """Which team is this? -> {"team", "source", "why"}
 
     `source` is "env", "map", or "none", so a record carries not only the answer but where it
@@ -170,10 +211,17 @@ def team_for(cwd=None, env=None, map_file=None) -> dict:
     if declared:
         return {"team": declared, "source": "env", "why": ""}
 
+    # Before the mapping: a session's statement about itself outranks an inference from where
+    # it is sitting. See the module docstring for the measurement that put this here.
+    said = declared_team(session_id, state_dir)
+    if said:
+        return {"team": said, "source": "session", "why": ""}
+
     mapping, why = load_map(map_file)
     if not mapping:
         return {"team": None, "source": "none",
-                "why": why or f"no {MAP_NAME} entry applies and {TEAM_ENV} is unset"}
+                "why": why or f"no {MAP_NAME} entry applies, {TEAM_ENV} is unset, and this "
+                              f"session has not run `attnroute team set`"}
 
     here = _resolve(cwd if cwd is not None else Path.cwd())
     # Longest prefix wins, so a worktree inside a mapped parent resolves to the worktree.
@@ -189,8 +237,14 @@ def team_for(cwd=None, env=None, map_file=None) -> dict:
             best, best_len = team, n
 
     if best is None:
+        # ⚠ THE WAY OUT IS NAMED, because this is the message a reader gets when telemetry
+        #   has no team on it -- and on the shared machine it is the EXPECTED message, not a
+        #   misconfiguration: every session there runs from one directory. A diagnostic that
+        #   states a problem without naming its remedy sends people to edit a mapping file
+        #   that cannot answer.
         return {"team": None, "source": "none",
-                "why": f"no {MAP_NAME} prefix matches {'/'.join(here) or '.'}"}
+                "why": f"no {MAP_NAME} prefix matches {'/'.join(here) or '.'}; run "
+                       f"`attnroute team set <TEAM>` in this session, or set {TEAM_ENV}"}
     return {"team": best, "source": "map", "why": ""}
 
 
@@ -199,12 +253,17 @@ def team_for(cwd=None, env=None, map_file=None) -> dict:
 _CACHE = {}
 
 
-def current(cwd=None) -> dict:
-    """`team_for` for this process, cached. Never raises."""
-    key = str(cwd) if cwd is not None else ""
+def current(cwd=None, session_id=None) -> dict:
+    """`team_for` for this process, cached. Never raises.
+
+    ⚠ THE CACHE KEY CARRIES THE SESSION. It used to be the cwd alone, which was right while
+      the cwd was the only thing consulted; with a declared team in play, one hook process
+      asking about two sessions would have been served the first answer twice.
+    """
+    key = (str(cwd) if cwd is not None else "", str(session_id or ""))
     if key not in _CACHE:
         try:
-            _CACHE[key] = team_for(cwd)
+            _CACHE[key] = team_for(cwd, session_id=session_id)
         except Exception as exc:          # noqa: BLE001 - a label must not cost a turn
             _CACHE[key] = {"team": None, "source": "none", "why": repr(exc)[:200]}
     return _CACHE[key]
