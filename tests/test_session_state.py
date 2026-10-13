@@ -67,6 +67,287 @@ def tool_result(text):
         {"type": "tool_result", "tool_use_id": "t1", "content": text}]}}
 
 
+def usage_line(total, *, cached=0, created=0):
+    """One assistant entry carrying a `usage` block, as the transcript writes it."""
+    return {"type": "assistant", "message": {"role": "assistant", "content": [],
+            "usage": {"input_tokens": total, "cache_read_input_tokens": cached,
+                      "cache_creation_input_tokens": created, "output_tokens": 99}}}
+
+
+def settings(root, **keys):
+    import json as _json
+    (root / ".claude").mkdir(parents=True, exist_ok=True)
+    (root / ".claude" / "settings.json").write_text(_json.dumps(keys), encoding="utf-8")
+    return root
+
+
+class TestTheApproachingBoundaryAlert:
+    """⚠⚠ WHAT THIS IS FOR. Auto-compact lands wherever the token count reaches the window,
+    which is as likely to be the middle of a half-applied refactor as a natural break. The
+    handback is 1,500 tokens against a window of hundreds of thousands, so most of what the
+    session knows goes either way -- but a human who knows the boundary is close can take it at a
+    break, for free.
+
+    The two tests worth keeping if only two could be kept:
+
+      * with no `autoCompactWindow` configured and no compaction observed, it stays SILENT no
+        matter how large the context is. "80% of what" is the whole question, and 80% of an
+        invented window reads exactly like 80% of a measured one;
+      * cache reads count toward the context. BurnRate shipped with them excluded and hid up to
+        95% of real usage; the same slip here would silently move the threshold by the same
+        factor, and every test about percentages would still pass.
+    """
+
+    def test_the_window_is_read_from_the_project_over_the_user(self, tmp_path, home):
+        settings(home, autoCompactWindow=1000000)
+        project = settings(tmp_path / "p", autoCompactWindow=400000)
+        found = ss.auto_compact_window(ss.empty_state("s"), project)
+        assert found["tokens"] == 400000
+        assert "400,000" in found["why"]
+
+    def test_the_user_setting_is_used_when_the_project_says_nothing(self, tmp_path, home):
+        settings(home, autoCompactWindow=250000)
+        (tmp_path / "p").mkdir()
+        found = ss.auto_compact_window(ss.empty_state("s"), tmp_path / "p")
+        assert found["tokens"] == 250000
+
+    @pytest.mark.parametrize("unusable", ["lots", 0, -1, None, ""])
+    def test_an_unusable_setting_is_passed_over_rather_than_coerced(
+            self, tmp_path, home, unusable):
+        """⚠ ZERO IS THE CASE THAT NEEDS THE GUARD, and it is why this is parametrised. A
+        window of "lots" is refused by anything that calls `int()` on it, so a test using only
+        that string passes under every plausible mis-implementation. Zero is perfectly
+        coercible -- and a window of 0 puts every context over the threshold, which is an alert
+        on every turn of every session: the noise this package exists to remove, arriving in the
+        name of preventing it."""
+        settings(home, autoCompactWindow=400000)
+        project = settings(tmp_path / "p", autoCompactWindow=unusable)
+        assert ss.auto_compact_window(ss.empty_state("s"), project)["tokens"] == 400000
+
+    def test_with_nothing_configured_it_falls_back_to_where_compaction_HAPPENED(
+            self, tmp_path, home):
+        """⚠ Observed, not assumed -- and the SMALLEST observation, because the alert's job is
+        to arrive before the boundary and only the earliest one guarantees that."""
+        (tmp_path / "p").mkdir()
+        state = ss.empty_state("s")
+        state["compacted_at"] = [402000, 371000, 396000]
+        found = ss.auto_compact_window(state, tmp_path / "p")
+        assert found["tokens"] == 371000
+        assert found["source"] == "observed"
+
+    def test_with_no_denominator_it_says_so_and_names_the_setting(self, tmp_path, home):
+        (tmp_path / "p").mkdir()
+        found = ss.auto_compact_window(ss.empty_state("s"), tmp_path / "p")
+        assert found["tokens"] is None
+        assert "autoCompactWindow" in found["why"]
+
+    def test_it_stays_silent_with_no_denominator_however_large_the_context(
+            self, tmp_path, home):
+        """⚠⚠ THE REFUSAL THIS MODULE IS BUILT AROUND. A million tokens of context and no
+        configured window produces NO alert, because "80% of the window" with no window is a
+        percentage of nothing -- and it would print to the same decimal place as a real one.
+        Falling back to a plausible default is the version of this that looks like it works."""
+        (tmp_path / "p").mkdir()
+        path = transcript(tmp_path / "t.jsonl", [usage_line(1_000_000)])
+        out = ss.compact_alert(ss.empty_state("s"), path, tmp_path / "p")
+        assert out["due"] is False
+        assert "no denominator" in out["why"] or "autoCompactWindow" in out["why"]
+
+    # ---- reading the context size ---------------------------------------------------------
+    def test_cache_reads_count_toward_the_context(self, tmp_path):
+        """⚠⚠ THEY ARE CONTEXT. A request carrying 300,000 cached tokens is 300,000 tokens
+        into the window. BurnRate shipped with cache reads excluded and hid up to 95% of real
+        usage (CHANGELOG 1.0.2); here the same slip would move the threshold by the same factor
+        with every percentage test still passing."""
+        path = transcript(tmp_path / "t.jsonl",
+                          [usage_line(1_000, cached=300_000, created=5_000)])
+        assert ss.context_tokens(path)["tokens"] == 306_000
+
+    def test_the_most_recent_usage_block_is_the_one_used(self, tmp_path):
+        path = transcript(tmp_path / "t.jsonl",
+                          [usage_line(10_000), usage_line(90_000)])
+        assert ss.context_tokens(path)["tokens"] == 90_000
+
+    def test_no_usage_block_reports_why_rather_than_zero(self, tmp_path):
+        """A zero would be indistinguishable from an empty context, and an empty context is the
+        safest-looking reading there is."""
+        path = transcript(tmp_path / "t.jsonl", [{"type": "user", "message": {}}])
+        found = ss.context_tokens(path)
+        assert found["tokens"] is None
+        assert "no usage block" in found["why"]
+
+    def test_an_absent_transcript_reports_why_rather_than_zero(self, tmp_path):
+        found = ss.context_tokens(tmp_path / "gone.jsonl")
+        assert found["tokens"] is None
+        assert "unreadable" in found["why"]
+
+    def _padded(self, path, head, tail):
+        """A transcript bigger than the tail: `head` usage at the front, `tail` at the back."""
+        with open(path, "w", encoding="utf-8") as fh:
+            if head is not None:
+                fh.write(json.dumps(usage_line(head)) + "\n")
+            pad = {"type": "user", "message": {"role": "user", "content": "x" * 4000}}
+            for _ in range(200):                 # ~800 KB, over the 256 KB tail
+                fh.write(json.dumps(pad) + "\n")
+            if tail is not None:
+                fh.write(json.dumps(usage_line(tail)) + "\n")
+        assert path.stat().st_size > ss.USAGE_TAIL_BYTES
+        return path
+
+    def test_the_last_usage_block_is_found_in_a_file_bigger_than_the_tail(self, tmp_path):
+        path = self._padded(tmp_path / "t.jsonl", head=123, tail=77_000)
+        assert ss.context_tokens(path)["tokens"] == 77_000
+
+    def test_the_read_is_bounded_in_bytes(self, tmp_path, monkeypatch):
+        """⚠⚠ MEASURED AS A RESOURCE PROPERTY, BECAUSE THE ANSWER CANNOT SHOW IT. Unbounding
+        the read -- seeking to 0 instead of to the tail -- returns the SAME number from the same
+        files, so every behavioural test stayed green through it. It was found by mutation and it
+        is pinned here by watching the read itself.
+
+        That is not a stylistic preference. This runs on a hook, and the Stop path once
+        re-parsed 300 MB from byte zero and cost 15 s; `tests/test_hook_latency_budget.py` gates
+        the same class of mistake as a proportion for the same reason. A timing assertion would
+        be a coin flip on a loaded runner. "It read no more than the tail" is the same answer on
+        every machine.
+        """
+        import builtins
+        path = self._padded(tmp_path / "t.jsonl", head=55_000, tail=77_000)
+        real_open = builtins.open
+        sizes = []
+
+        class Probe:
+            """Just enough file to serve `context_tokens`, counting what it hands over."""
+
+            def __init__(self, fh):
+                self.fh = fh
+
+            def seek(self, *a):
+                return self.fh.seek(*a)
+
+            def read(self, *a):
+                data = self.fh.read(*a)
+                sizes.append(len(data))
+                return data
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.fh.close()
+
+        def counting_open(file, mode="r", *a, **k):
+            fh = real_open(file, mode, *a, **k)
+            return Probe(fh) if "b" in mode and str(file) == str(path) else fh
+
+        monkeypatch.setattr(builtins, "open", counting_open)
+        found = ss.context_tokens(path)
+        monkeypatch.undo()
+
+        assert found["tokens"] == 77_000, "and it still answers correctly"
+        assert sizes, "the probe saw nothing, so this test proves nothing"
+        assert max(sizes) <= ss.USAGE_TAIL_BYTES, (
+            f"read {max(sizes):,} bytes of a {path.stat().st_size:,}-byte transcript")
+
+    def test_a_usage_block_older_than_the_tail_is_not_found(self, tmp_path):
+        """⚠⚠ THE LIMITATION, ASSERTED RATHER THAN IMPLIED -- and the only observable
+        difference between a tail read and a whole-file read. The first version of this test
+        checked that the LAST block is found, which a `seek(0)` does equally well: it answered a
+        narrower question than its own name asked, and the mutation that unbounded the read left
+        it green. The read is bounded because this runs in a hook -- the Stop path once re-parsed
+        300 MB from byte zero and cost 15 s -- and the price of that bound is this: a session
+        whose last 256 KB contain no usage block is reported as unknown, not as empty."""
+        path = self._padded(tmp_path / "t.jsonl", head=55_000, tail=None)
+        found = ss.context_tokens(path)
+        assert found["tokens"] is None
+        assert "no usage block" in found["why"]
+
+    # ---- when it speaks -------------------------------------------------------------------
+    def test_it_speaks_at_the_threshold_and_not_below_it(self, tmp_path, home):
+        project = settings(tmp_path / "p", autoCompactWindow=400000)
+        under = transcript(tmp_path / "under.jsonl", [usage_line(319_000)])
+        over = transcript(tmp_path / "over.jsonl", [usage_line(321_000)])
+        assert ss.compact_alert(ss.empty_state("s"), under, project)["due"] is False
+        assert ss.compact_alert(ss.empty_state("s"), over, project)["due"] is True
+
+    def test_the_threshold_leaves_room_for_the_turn_that_crosses_it(self):
+        """⚠ Not 0.95. A hook reads the context the LAST request carried, so the turn that
+        actually crosses the window is the turn that never gets a warning. The margin is that
+        one turn of slack, and it is the reason for the number."""
+        assert ss.ALERT_AT <= 0.85
+
+    def test_it_names_the_numbers_and_where_the_limit_came_from(self, tmp_path, home):
+        project = settings(tmp_path / "p", autoCompactWindow=400000)
+        path = transcript(tmp_path / "t.jsonl", [usage_line(340_000)])
+        out = ss.compact_alert(ss.empty_state("s"), path, project)
+        assert "340,000" in out["text"] and "400,000" in out["text"]
+        assert "settings.json" in out["text"], "a percentage without its denominator's source"
+
+    def test_it_asks_for_a_sentence_and_not_for_an_action(self, tmp_path, home):
+        """⚠ Whether a break is a good place to stop is the human's call. A hook that acted on
+        its own judgement here would be taking it."""
+        project = settings(tmp_path / "p", autoCompactWindow=400000)
+        path = transcript(tmp_path / "t.jsonl", [usage_line(340_000)])
+        text = ss.compact_alert(ss.empty_state("s"), path, project)["text"]
+        assert "Tell the user" in text
+        assert "Do not compact anything yourself" in text
+
+    def test_it_speaks_once_per_window(self, tmp_path, home):
+        project = settings(tmp_path / "p", autoCompactWindow=400000)
+        path = transcript(tmp_path / "t.jsonl", [usage_line(340_000)])
+        state = ss.empty_state("s")
+        assert ss.compact_alert(state, path, project)["due"] is True
+        state["alerted_window"] = state["window"]        # as the Stop handler records it
+        again = ss.compact_alert(state, path, project)
+        assert again["due"] is False
+        state["window"] += 1                             # a compaction happened
+        assert ss.compact_alert(state, path, project)["due"] is True
+
+    # ---- the hook path --------------------------------------------------------------------
+    def test_the_stop_hook_carries_the_alert(self, tmp_path, home):
+        project = settings(tmp_path / "p", autoCompactWindow=400000)
+        path = transcript(tmp_path / "t.jsonl", [usage_line(340_000)])
+        out = ss.hook({"hook_event_name": "Stop", "session_id": "s",
+                       "transcript_path": str(path), "cwd": str(project)}, repo=project)
+        assert "autoCompactWindow" in out["hookSpecificOutput"]["additionalContext"]
+
+    def test_the_alert_outranks_the_note_nudge_but_does_not_cancel_it(self, tmp_path, home):
+        """⚠⚠ `additionalContext` IS ONE STRING AND ONLY ONE OF THEM CAN SPEAK. Two
+        instructions in it compete, and the nudge would win on being easier to act on. A note
+        that waits another 25 turns costs a note; a boundary landing mid-task costs the window.
+        So the nudge is DEFERRED -- its turn counter keeps running -- and not skipped."""
+        project = settings(tmp_path / "p", autoCompactWindow=400000)
+        path = tmp_path / "t.jsonl"
+        entries = [assistant([tool_use("Edit", {"file_path": f"f{i}.py"})])
+                   for i in range(ss.NUDGE_AFTER_EDITS + 2)]
+        transcript(path, [*entries, usage_line(340_000)])
+        state = ss.empty_state("s")
+        state["turns_since_nudge"] = ss.NUDGE_EVERY_TURNS + 1
+        ss.save("s", state)
+
+        out = ss.hook({"hook_event_name": "Stop", "session_id": "s",
+                       "transcript_path": str(path), "cwd": str(project)}, repo=project)
+        said = out["hookSpecificOutput"]["additionalContext"]
+        assert "autoCompactWindow" in said, "the boundary warning is the one that speaks"
+        assert "note add" not in said
+        after = ss.load("s")
+        assert after["turns_since_nudge"] > ss.NUDGE_EVERY_TURNS, "the nudge is still owed"
+
+    def test_precompact_records_where_the_boundary_actually_was(self, tmp_path, home):
+        path = transcript(tmp_path / "t.jsonl", [usage_line(398_000)])
+        ss.hook({"hook_event_name": "PreCompact", "session_id": "s",
+                 "transcript_path": str(path)}, repo=tmp_path)
+        assert ss.load("s")["compacted_at"] == [398_000]
+
+    def test_the_observed_boundaries_are_bounded(self, tmp_path, home):
+        state = ss.empty_state("s")
+        state["compacted_at"] = list(range(1, 30))
+        ss.save("s", state)
+        path = transcript(tmp_path / "t.jsonl", [usage_line(400_000)])
+        ss.hook({"hook_event_name": "PreCompact", "session_id": "s",
+                 "transcript_path": str(path)}, repo=tmp_path)
+        assert len(ss.load("s")["compacted_at"]) == 8
+
+
 class TestTheCompactionQualityLedger:
     """⚠⚠ THE HALF OF THE COST PROGRAMME THAT HAS NEVER BEEN COUNTED. Every lever in this
     package is justified by tokens saved "without quality loss", and the second clause has been
