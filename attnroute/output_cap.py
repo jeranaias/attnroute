@@ -109,9 +109,24 @@ def holdout_pct(env_name: str, default: int) -> tuple:
     return value, ""
 
 
+#: ⚠⚠ `surrogatepass`, AND NOT BECAUSE OF TIDINESS. This raised `UnicodeEncodeError` 85
+#:   times in nine days of live telemetry on the shared machine: a Bash command arriving through
+#:   the hook payload can carry a lone surrogate (Windows paths and terminal input reach JSON
+#:   that way), and a bare `.encode("utf-8")` refuses it. Every one of those turns got NO arm and
+#:   NO decision -- the saving tables simply had fewer rows, and the failures were logged under a
+#:   separate event that nothing reads. A measurement that drops the inputs it cannot encode
+#:   reports a clean number over a quietly smaller population.
+#:
+#: ⚠⚠ AND `surrogatepass` RATHER THAN `replace` BECAUSE THE ARMS MUST NOT MOVE. For any
+#:   string without surrogates the two produce IDENTICAL bytes, so every bucket already assigned
+#:   stays assigned; `replace` maps every unencodable character to one codepoint, which both
+#:   collides distinct commands and would re-bucket nothing today while inviting it tomorrow. A
+#:   change that silently re-randomised the treated/held-out split would invalidate the
+#:   comparison this whole trial exists to make.
 def _bucket(*parts) -> int:
     """A stable 0-99 bucket; `hash()` is randomised per process and would not replay."""
-    h = hashlib.sha256("\x1f".join(str(p) for p in parts).encode("utf-8")).hexdigest()
+    h = hashlib.sha256(
+        "\x1f".join(str(p) for p in parts).encode("utf-8", "surrogatepass")).hexdigest()
     return int(h[:8], 16) % 100
 
 
@@ -283,7 +298,8 @@ def handle(payload: dict) -> dict | None:
         d = outputs_dir()
         d.mkdir(parents=True, exist_ok=True)
         sweep(d)
-        digest = hashlib.sha256(f"{sid}\x1f{cmd}\x1f{os.getpid()}".encode()).hexdigest()
+        digest = hashlib.sha256(
+            f"{sid}\x1f{cmd}\x1f{os.getpid()}".encode("utf-8", "surrogatepass")).hexdigest()
         name = f"{digest[:16]}.log"
         out_path = (d / name).as_posix()
     except OSError:
