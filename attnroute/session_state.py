@@ -148,7 +148,8 @@ def state_path(session_id: str) -> Path:
 def empty_state(session_id: str = "") -> dict:
     return {"version": STATE_VERSION, "session": session_id, "notes": [],
             "handed_back": [], "transcript_offset": None, "window": 0,
-            "facts": {}, "handbacks": 0}
+            "facts": {}, "handbacks": 0, "ledger": [], "ledger_left": 0,
+            "ledger_repeats": 0, "ledger_of": 0, "ledger_window": 0}
 
 
 def load(session_id: str) -> dict:
@@ -332,6 +333,158 @@ def check_promotion(note: dict, repo: Path | str = ".") -> dict:
 PR_URL = re.compile(r"https?://[^\s]*?/pull/(\d+)")
 
 
+# ═══ THE COMPACTION QUALITY LEDGER ══════════════════════════════════════
+#
+# ⚠⚠ WHAT THIS MEASURES, AND WHY A COST PROGRAMME NEEDS IT. Every lever in this package buys
+#    cheaper context, and the bill is the only half anybody has measured. The other half --
+#    whether the work got worse -- has been asserted ("without quality loss") and never counted.
+#    This counts ONE objective thing: a tool call issued after a compaction that this session had
+#    ALREADY issued before it. That is re-derivation: work done twice because its answer was
+#    summarised away. It is the cheapest honest proxy available, and it is a proxy.
+#
+# ⚠⚠ IT IS NOT A WASTE COUNT AND MUST NEVER BE REPORTED AS ONE. Re-reading a file you are
+#    editing is legitimate and is counted here. The per-session spread measured below was 2.4 to
+#    18.7 -- nearly eightfold between seats doing the same kind of work -- so a LEVEL says nothing
+#    about any of them. **A RISE, in one session against its own earlier windows, is the whole
+#    signal.** See `ledger_summary`, which is why it refuses to compare seats.
+#
+# ⚠⚠ AND IT DELIBERATELY DOES NOT COUNT CONTRADICTED RULINGS OR OWNER CORRECTIONS, which are
+#    the two things that actually matter and were both asked for. Both need a judgement about
+#    prose, and this module's rule is that a fact handed to the next window is something already
+#    written down, never inferred. A classifier guessing at "contradicted ruling" would find
+#    nothing in most windows and report quality fine -- a check that cannot fire, wearing the name
+#    of the one that matters, which is the exact failure shape this programme refuses. Those
+#    belong to a human: `attnroute note add --kind correction` records one, and it is counted
+#    separately and honestly, as a thing somebody noticed rather than a thing a regex found.
+
+#: How many calls after a boundary count as the resuming window re-establishing itself. Past this
+#: the session is doing new work and a repeat means little.
+LEDGER_AFTER = 40
+
+#: How many call signatures are remembered.
+#:
+#: ⚠⚠ A BOUND MEANS THIS UNDER-COUNTS, AND THE BASELINE WAS RE-MEASURED AT THE SAME BOUND
+#:   BECAUSE OF IT. The signatures live in a state file every hook reads every turn, so an
+#:   unbounded set is not available. A bounded memory misses a repeat of a call that fell out of
+#:   it. Measured on the same five transcripts: unbounded 8.9 repeats per compaction, bounded at
+#:   400 8.4 -- the bound costs 6% of the signal, in the FLATTERING direction. Comparing a bounded
+#:   implementation against the unbounded baseline would therefore have shown an improvement that
+#:   was nothing but the measure getting weaker. `LEDGER_BASELINE_1M` below is the bounded figure,
+#:   and `benchmarks/compact_quality.py` takes the bound as an argument so anyone can re-derive
+#:   both.
+LEDGER_SIGS = 400
+
+#: Repeats per counted call at a 1,000,000-token `autoCompactWindow`: 8.4 in the first 40 calls
+#: after each compaction, over 74 compactions in five transcripts, signature memory 400.
+#:
+#: ⚠⚠ AND IT IS 8.4 BECAUSE THE BENCHMARK USES THE COUNTER BELOW RATHER THAN A COPY OF IT.
+#:   A standalone script measured 10.4 on the same transcripts, a 24% difference, for one reason:
+#:   it truncated a command signature at 120 characters where `call_signature` truncates at 200,
+#:   so long `git`/`python` commands sharing a prefix were counted as the same call. That is what
+#:   a re-implemented measure does -- it reports a number of the right magnitude, with the same
+#:   decimal places, that cannot be compared to anything the product does. The benchmark now
+#:   imports this module.
+#:
+#: ⚠ A SNAPSHOT, NOT A CONSTANT OF NATURE -- re-derive it with `benchmarks/compact_quality.py`
+#:   rather than trusting this line. It is here so the 400,000-era number has something measured
+#:   to be compared against, and it is a FLEET figure, which makes it the weaker of the two
+#:   comparisons available. The strong one is a session against itself.
+LEDGER_BASELINE_1M = 8.4 / 40
+
+#: The parameters that figure was measured with. Checked against the constants above by
+#: `tests/test_session_state.py`, because a baseline measured over 40 calls with a memory of 400
+#: is NOT comparable to a ledger counting 80 calls with a memory of 1,000 -- and the comparison
+#: would still print, with the same decimal places and no sign that it had stopped meaning
+#: anything. Change either constant and this number has to be re-derived, not re-labelled.
+LEDGER_BASELINE_MEASURED_AT = {"after": 40, "sigs": 400, "compactions": 74, "sessions": 5,
+                               "window": 1000000}
+
+#: How many rows are kept. NOT the same 40 as `LEDGER_AFTER` -- that one counts CALLS inside one
+#: window, this one counts WINDOWS. They are equal today by coincidence and are not the same
+#: quantity, which is exactly how a literal gets reused into a bug.
+LEDGER_ROWS = 40
+
+#: Windows needed before `rising` is allowed to say anything. Two rows is one comparison, and one
+#: comparison on a measure this noisy is a coin flip with a verdict attached.
+LEDGER_MIN_ROWS = 3
+
+#: Which input identifies a call, per tool. Anything unlisted signs on the tool name alone --
+#: deliberately blunt, because a blunt signature OVER-counts, and over-counting is the safe
+#: direction for a number whose job is to reveal a rise.
+LEDGER_KEYS = {"Bash": "command", "Read": "file_path", "Edit": "file_path",
+               "Write": "file_path", "Grep": "pattern", "Glob": "pattern",
+               "NotebookEdit": "notebook_path"}
+
+
+def call_signature(name: str, data) -> str:
+    """What makes two tool calls "the same call" for re-derivation purposes. -> 12 hex chars
+
+    HASHED RATHER THAN STORED AS TEXT, because 400 of these live in a file that every hook reads
+    on every turn and the full text would add tens of kilobytes to it. Repeat detection needs
+    equality and nothing else, so the digest loses nothing the ledger uses.
+    """
+    # Imported here rather than at module scope: every hook event is a fresh interpreter, and
+    # the modules that load this one without deriving facts should not pay for it.
+    import hashlib
+    key = LEDGER_KEYS.get(name)
+    val = str((data or {}).get(key) or "") if (key and isinstance(data, dict)) else ""
+    raw = name + "|" + " ".join(val.split())[:200]
+    return hashlib.blake2s(raw.encode("utf-8", "replace"), digest_size=6).hexdigest()
+
+
+def _close_ledger_row(state: dict) -> None:
+    """Write one compaction's row, if a window was open. Idempotent."""
+    counted = int(state.get("ledger_of", 0))
+    if counted:
+        rows = state.setdefault("ledger", [])
+        rows.append({"window": int(state.get("ledger_window", state.get("window", 0))),
+                     "repeats": int(state.get("ledger_repeats", 0)), "of": counted,
+                     "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+        # Bounded for the same reason as everything else in this file: it is read every turn.
+        del rows[:-LEDGER_ROWS]
+    state["ledger_repeats"] = 0
+    state["ledger_of"] = 0
+    state["ledger_left"] = 0
+
+
+def ledger_summary(state: dict) -> dict:
+    """-> {"rows", "rate", "baseline", "fleet_baseline", "rising", "why"}
+
+    ⚠⚠ THE COMPARISON IS THIS SESSION AGAINST ITSELF, AND THE MEASUREMENT IS WHY.
+       Per-session rates at a 1,000,000 window were 18.7, 10.0, 5.1, 4.0 and 2.4 repeats per
+       compaction. A fleet average across a spread like that hides one seat getting worse behind
+       another getting better -- the one thing a check on quality must not do. The fleet figure is
+       returned as well, clearly named, because it is what the 1M era can be compared against at
+       all; it is the weaker claim and it is labelled as the weaker claim.
+
+    ⚠ AND IT IS REPORTED, NEVER ENFORCED. This function knows nothing about what the session was
+      doing; a window that legitimately re-reads twenty files is indistinguishable here from one
+      that lost its place. A gate blocking on a number this blunt would be switched off within a
+      week, and the measurement would go with it.
+    """
+    rows = [r for r in (state.get("ledger") or []) if r.get("of")]
+    if not rows:
+        return {"rows": 0, "rate": None, "baseline": None,
+                "fleet_baseline": LEDGER_BASELINE_1M, "rising": False,
+                "why": "no window has been measured yet"}
+    rate = rows[-1]["repeats"] / rows[-1]["of"]
+    prior = rows[:-1]
+    own = (sum(r["repeats"] for r in prior) / sum(r["of"] for r in prior)) if prior else None
+    if len(rows) < LEDGER_MIN_ROWS:
+        rising = False
+        why = (f"{len(rows)} window(s) measured; {LEDGER_MIN_ROWS} needed before a rise "
+               f"means anything")
+    elif rate > own:
+        rising = True
+        why = (f"this window re-derived {rate:.0%} of its first calls, against "
+               f"{own:.0%} over this session's earlier windows")
+    else:
+        rising = False
+        why = f"{rate:.0%} against {own:.0%} over this session's earlier windows"
+    return {"rows": len(rows), "rate": rate, "baseline": own,
+            "fleet_baseline": LEDGER_BASELINE_1M, "rising": rising, "why": why}
+
+
 def derive_facts(state: dict, transcript_path) -> dict:
     """Update `state["facts"]` from the transcript written since the last look.
 
@@ -347,6 +500,8 @@ def derive_facts(state: dict, transcript_path) -> dict:
     edited = facts.setdefault("edited", {})
     commands = facts.setdefault("commands", [])
     prs = facts.setdefault("prs", [])
+    #: Call signatures, least recently used first -- see `call_signature`.
+    sigs = facts.setdefault("sigs", [])
     #: Tool-call ids already counted. Bounded: the only ones that can overlap a future
     #: span are the recent ones.
     seen_calls = facts.setdefault("seen_calls", [])
@@ -388,6 +543,23 @@ def derive_facts(state: dict, transcript_path) -> dict:
                     seen_calls.append(call_id)
                 name = block.get("name", "")
                 data = block.get("input") if isinstance(block.get("input"), dict) else {}
+                # The ledger counts HERE, below the count-once-by-id guard above, so a re-read
+                # span cannot report one call as two repeats.
+                sig = call_signature(name, data)
+                if int(state.get("ledger_left", 0)) > 0:
+                    state["ledger_left"] = int(state["ledger_left"]) - 1
+                    state["ledger_of"] = int(state.get("ledger_of", 0)) + 1
+                    if sig in sigs:
+                        state["ledger_repeats"] = int(state.get("ledger_repeats", 0)) + 1
+                    if int(state["ledger_left"]) == 0:
+                        _close_ledger_row(state)
+                # ⚠ OUTSIDE THAT GUARD ON PURPOSE. Signatures accumulate through the window
+                #   BEFORE a compaction as well; they are what the window after it is compared
+                #   against. Inside the guard, the first row of every session would have nothing
+                #   to find and would read as a perfect score.
+                if sig in sigs:
+                    sigs.remove(sig)
+                sigs.append(sig)
                 if name in EDIT_TOOLS:
                     target = str(data.get("file_path") or data.get("notebook_path") or "")
                     if target:
@@ -418,6 +590,7 @@ def derive_facts(state: dict, transcript_path) -> dict:
     # Bounded: the handback has 1,500 tokens, so keeping more than this helps nobody.
     facts["commands"] = commands[-8:]
     facts["prs"] = prs[-6:]
+    facts["sigs"] = sigs[-LEDGER_SIGS:]
     facts["seen_calls"] = seen_calls[-500:]
     if len(edited) > 40:
         facts["edited"] = dict(sorted(edited.items(), key=lambda kv: -kv[1])[:40])
@@ -583,6 +756,15 @@ def mark_handed_back(state: dict, included: list) -> None:
     handed.update(included or [])
     state["handed_back"] = sorted(handed)
     state["handbacks"] = int(state.get("handbacks", 0)) + 1
+    # ⚠⚠ THE MEASURING WINDOW OPENS HERE BECAUSE THIS IS THE ONLY PLACE A COMPACTION IS KNOWN
+    #    TO HAVE HAPPENED. `PreCompact` fires when one is ABOUT to, and a session can be killed
+    #    between the two; a handback is what `SessionStart(source=compact)` does, after the fact.
+    #    Any row left half-counted by a session that stopped mid-window is CLOSED rather than
+    #    discarded -- a short row is honest about how short it is (`of`), and dropping it would
+    #    quietly delete the windows most likely to have gone badly.
+    _close_ledger_row(state)
+    state["ledger_left"] = LEDGER_AFTER
+    state["ledger_window"] = int(state.get("window", 0))
 
 # ═══ THE WIRING ════════════════════════════════════════════════════════════════════════
 #

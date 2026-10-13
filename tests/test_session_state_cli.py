@@ -107,6 +107,37 @@ def test_state_show_says_so_when_there_is_nothing(home, project):
     assert "no notes recorded" in done.stderr
 
 
+def test_state_show_reports_the_quality_ledger_even_with_no_notes(home, project):
+    """⚠⚠ A SESSION THAT COMPACTED EIGHT TIMES AND WROTE NOTHING DOWN IS THE ONE WORTH
+    ASKING ABOUT, and `show` exits 1 on an empty note list. If the measurement printed after that
+    early return, it would be invisible to exactly the sessions that most needed it -- so this
+    test asserts it appears WITH the non-zero exit, not instead of it."""
+    import json as _json
+    from pathlib import Path as _Path
+    path = _Path(home) / ".claude" / "attn_state" / "sessions" / "s.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {"version": 1, "session": "s", "notes": [], "handed_back": [],
+             "transcript_offset": None, "window": 3, "facts": {}, "handbacks": 3,
+             "ledger": [{"window": 1, "repeats": 2, "of": 40, "at": ""},
+                        {"window": 2, "repeats": 2, "of": 40, "at": ""},
+                        {"window": 3, "repeats": 20, "of": 40, "at": ""}],
+             "ledger_left": 0, "ledger_repeats": 0, "ledger_of": 0, "ledger_window": 3}
+    path.write_text(_json.dumps(state), encoding="utf-8")
+
+    done = run(home, project, "state", "show", "--session", "s")
+    assert done.returncode == 1, "the empty note list still fails the command"
+    assert "no notes recorded" in done.stderr
+    assert "RISING" in done.stderr, "and the measurement is still reported"
+    assert "20/40" in done.stderr, "with the denominator, not a bare percentage"
+
+
+def test_state_show_is_silent_about_a_ledger_that_has_measured_nothing(home, project):
+    """A measurement with no windows behind it is not a reassuring zero -- it is nothing, and
+    printing it as a number would be the same mistake in miniature."""
+    done = run(home, project, "state", "show", "--session", "nobody")
+    assert "re-derivation" not in done.stderr
+
+
 def test_state_handback_prints_what_the_next_window_would_get(home, project):
     run(home, project, "note", "add", "the ruling that must survive", "--kind", "ruling",
         "--session", "s")

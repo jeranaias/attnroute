@@ -559,6 +559,7 @@ def cmd_state(args):
         TOKEN_BUDGET,
         check_promotion,
         handback,
+        ledger_summary,
         load,
         session_from_env,
     )
@@ -582,6 +583,28 @@ def cmd_state(args):
         print(f"[attnroute] {built['tokens']} of {TOKEN_BUDGET} tokens, "
               f"{built['dropped']} item(s) dropped", file=sys.stderr)
         return 0
+
+    # ⚠⚠ THE LEDGER PRINTS BEFORE THE NOTES CHECK BELOW, WHICH EXITS 1 ON AN EMPTY
+    #    LIST. A session that compacted eight times and wrote no notes is precisely the one worth
+    #    asking about, and putting the measurement after that early return would have hidden it
+    #    from every session that most needed to see it.
+    #
+    # ⚠ AND IT PRINTS THE DENOMINATOR, NOT JUST A PERCENTAGE. A row covering five calls
+    #   and a row covering forty are not the same evidence, and a bare "40%" does not say which it
+    #   is -- a quantity without the condition it was measured under.
+    measured = ledger_summary(state)
+    if measured["rows"]:
+        windows = "  ".join(f"w{r.get('window', '?')} {r['repeats']}/{r['of']}"
+                            for r in (state.get("ledger") or [])[-6:])
+        rising = "RISING: " if measured["rising"] else ""
+        fleet = 100 * measured["fleet_baseline"]
+        print(f"[attnroute] re-derivation after a compaction, "
+              f"{measured['rows']} window(s): {windows}", file=sys.stderr)
+        print(f"[attnroute] {rising}{measured['why']} (fleet at a 1,000,000 window: "
+              f"{fleet:.0f}% -- the weaker comparison)", file=sys.stderr)
+        print("[attnroute] a repeat is a call this session had already made before the "
+              "boundary; re-reading a file you are editing counts, so this is a TREND and "
+              "not a waste count", file=sys.stderr)
 
     # `show` lists EVERYTHING, which is what the handback's drop notice points people to.
     notes = state.get("notes") or []

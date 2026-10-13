@@ -67,6 +67,236 @@ def tool_result(text):
         {"type": "tool_result", "tool_use_id": "t1", "content": text}]}}
 
 
+class TestTheCompactionQualityLedger:
+    """⚠⚠ THE HALF OF THE COST PROGRAMME THAT HAS NEVER BEEN COUNTED. Every lever in this
+    package is justified by tokens saved "without quality loss", and the second clause has been
+    asserted every time and measured none. These tests are about the one objective thing that can
+    be counted -- a call issued after a compaction that this session had already issued before it
+    -- and, as much as anything, about the properties that keep that count honest when somebody
+    tidies the code later.
+
+    The three worth keeping if only three could be kept:
+
+      * signatures accumulate BEFORE the boundary, because they are what the window after it is
+        compared against. Move that one line inside the measuring guard and the first row of every
+        session reports a perfect score, for ever, with no test failing;
+      * a window cut short is RECORDED, not discarded, because the sessions that die mid-window
+        are the ones most likely to have gone badly;
+      * `rising` refuses to speak until three windows exist, and compares a session to ITSELF.
+        The fleet spread was 2.4 to 18.7 repeats per compaction, so a fleet comparison would
+        report a seat as healthy for no better reason than which seat it was.
+    """
+
+    def _derive(self, state, path, blocks):
+        """Append these tool-use blocks to the transcript and derive. Returns the state."""
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(assistant(blocks)) + "\n")
+        ss.derive_facts(state, path)
+        return state
+
+    def test_nothing_is_counted_before_the_first_compaction(self, tmp_path):
+        """⚠ There is no "after a boundary" before a boundary. A session that has never
+        compacted has no row, and a row with no window behind it would be a comparison against
+        nothing."""
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        self._derive(state, path, [tool_use("Read", {"file_path": "a.py"}),
+                                   tool_use("Read", {"file_path": "a.py"})])
+        assert state["ledger"] == []
+        assert state["ledger_of"] == 0
+
+    def test_a_call_repeated_after_a_compaction_is_counted(self, repo, tmp_path):
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        self._derive(state, path, [tool_use("Read", {"file_path": "nav/heading.py"})])
+        ss.mark_handed_back(state, [])
+        self._derive(state, path, [tool_use("Read", {"file_path": "nav/heading.py"}),
+                                   tool_use("Read", {"file_path": "nav/new.py"})])
+        assert state["ledger_repeats"] == 1
+        assert state["ledger_of"] == 2
+
+    def test_signatures_from_before_the_boundary_are_what_make_a_repeat_visible(
+            self, tmp_path):
+        """⚠⚠ THE LINE A TIDY-UP WOULD MOVE, AND WHY IT MUST NOT. The signature list is
+        appended to OUTSIDE the "are we measuring" guard. Move it inside -- which reads like an
+        optimisation, since nothing else uses the list -- and the window after a compaction has
+        nothing to compare itself against: every row reads zero repeats, the ledger reports
+        quality improving, and no other test in this file fails. That is the reassuring failure
+        this whole module exists to refuse, so it is pinned here on its own."""
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        # One call, in the window BEFORE the compaction. The measuring window is not open.
+        self._derive(state, path, [tool_use("Grep", {"pattern": "FENCE_ACTION"})])
+        assert state["ledger_of"] == 0, "nothing should be counted yet"
+        assert state["facts"]["sigs"], "but the signature must have been remembered"
+        ss.mark_handed_back(state, [])
+        self._derive(state, path, [tool_use("Grep", {"pattern": "FENCE_ACTION"})])
+        assert state["ledger_repeats"] == 1
+
+    def test_a_call_first_made_after_the_boundary_is_not_a_repeat(self, tmp_path):
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        ss.mark_handed_back(state, [])
+        self._derive(state, path, [tool_use("Read", {"file_path": "a.py"})])
+        assert state["ledger_of"] == 1
+        assert state["ledger_repeats"] == 0
+
+    def test_the_row_closes_after_the_window_and_records_what_it_counted(self, tmp_path):
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        ss.mark_handed_back(state, [])
+        self._derive(state, path, [tool_use("Read", {"file_path": f"f{i}.py"})
+                                   for i in range(ss.LEDGER_AFTER + 5)])
+        assert len(state["ledger"]) == 1
+        row = state["ledger"][0]
+        assert row["of"] == ss.LEDGER_AFTER, "the window has a fixed width, not a fixed turn"
+        assert state["ledger_left"] == 0, "and it stops counting once it is full"
+
+    def test_a_window_cut_short_is_recorded_rather_than_discarded(self, tmp_path):
+        """⚠⚠ A SHORT ROW IS HONEST ABOUT BEING SHORT; A DROPPED ONE IS NOT THERE TO BE
+        HONEST ABOUT ANYTHING. A session that compacts again -- or is killed -- five calls into a
+        forty-call window is exactly the session whose window went badly, and discarding partial
+        rows would quietly delete the evidence most worth having. So the row is written with its
+        real denominator and the reader can weight it."""
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        ss.mark_handed_back(state, [])
+        self._derive(state, path, [tool_use("Read", {"file_path": f"a{i}.py"})
+                                   for i in range(5)])
+        ss.mark_handed_back(state, [])          # compacted again, early
+        assert len(state["ledger"]) == 1
+        assert state["ledger"][0]["of"] == 5
+
+    def test_one_call_seen_in_two_overlapping_spans_is_counted_once(self, tmp_path):
+        """A rewound offset, a rotated transcript or two hooks racing can show the same call
+        twice. The id guard above this counter is what stops that becoming a repeat the session
+        never made -- and a repeat invented by the reader is worse than one missed, because it
+        reports rework that did not happen."""
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        ss.mark_handed_back(state, [])
+        self._derive(state, path, [tool_use("Read", {"file_path": "a.py"})])
+        state["transcript_offset"] = 0          # the span is read again
+        ss.derive_facts(state, path)
+        assert state["ledger_of"] == 1
+        assert state["ledger_repeats"] == 0
+
+    def test_two_different_files_are_two_different_calls(self, tmp_path):
+        a = ss.call_signature("Read", {"file_path": "a.py"})
+        b = ss.call_signature("Read", {"file_path": "b.py"})
+        assert a != b
+        assert a == ss.call_signature("Read", {"file_path": "a.py"})
+
+    def test_an_unlisted_tool_signs_on_its_name_alone_and_over_counts(self):
+        """⚠ DELIBERATE, AND THE DIRECTION MATTERS. Two different WebSearch queries read as
+        the same call, so the number is too high rather than too low. For a measure whose job is
+        to reveal a RISE, over-counting costs a false alarm somebody investigates;
+        under-counting costs the alarm itself."""
+        assert (ss.call_signature("WebSearch", {"query": "one"})
+                == ss.call_signature("WebSearch", {"query": "two"}))
+
+    def test_the_committed_baseline_names_the_parameters_it_was_measured_with(self):
+        """⚠⚠ THE CHECK THAT STOPS A STALE NUMBER BEING COMPARED TO A LIVE ONE. 8.4 repeats
+        per compaction was measured over 40 calls with a signature memory of 400. Change either
+        constant and the figure is no longer comparable to anything this ledger counts -- but the
+        comparison would still print, to the same decimal place, with nothing to show it had
+        stopped meaning something. Re-derive it with `benchmarks/compact_quality.py`."""
+        assert ss.LEDGER_BASELINE_MEASURED_AT["after"] == ss.LEDGER_AFTER
+        assert ss.LEDGER_BASELINE_MEASURED_AT["sigs"] == ss.LEDGER_SIGS
+
+    def test_the_benchmark_uses_this_counter_rather_than_a_copy_of_it(self):
+        """⚠⚠ AND THIS IS WHY THAT BASELINE IS 8.4. A standalone version of the benchmark
+        measured 10.4 on the same five transcripts -- a 24% difference -- because it truncated a
+        command signature at 120 characters where `call_signature` truncates at 200, so long
+        commands sharing a prefix were counted as the same call. A re-implemented measure returns
+        a number of the right magnitude that cannot be compared to anything the product does."""
+        from benchmarks import compact_quality
+        assert compact_quality.call_signature is ss.call_signature
+        assert compact_quality.LEDGER_AFTER is ss.LEDGER_AFTER
+
+    # ---- what the number is allowed to SAY ------------------------------------------------
+    def _with_rows(self, rows):
+        state = ss.empty_state("s")
+        state["ledger"] = [{"window": i, "repeats": r, "of": n, "at": ""}
+                           for i, (r, n) in enumerate(rows)]
+        return state
+
+    def test_rising_says_nothing_until_three_windows_exist(self):
+        """One comparison on a measure this noisy is a coin flip with a verdict attached."""
+        out = ss.ledger_summary(self._with_rows([(2, 40), (30, 40)]))
+        assert out["rising"] is False
+        assert "needed before a rise" in out["why"]
+
+    def test_a_session_getting_worse_against_itself_is_what_rising_means(self):
+        out = ss.ledger_summary(self._with_rows([(4, 40), (4, 40), (28, 40)]))
+        assert out["rising"] is True
+        assert out["rate"] == 0.7
+        assert out["baseline"] == 0.1
+
+    def test_it_compares_a_session_to_itself_and_not_to_the_fleet(self):
+        """⚠⚠ THE SPREAD IS WHY. Per-session rates at a 1,000,000 window ran 2.4 to 18.7
+        repeats per compaction -- nearly eightfold, between seats doing the same kind of work. A
+        session sitting at twice its own best rate is degrading even while it is still well under
+        the fleet average, and a fleet comparison would call it healthy. The fleet figure is
+        returned too, under a name that says what it is."""
+        # Well below the fleet baseline in absolute terms, and twice its own history.
+        state = self._with_rows([(1, 40), (1, 40), (4, 40)])
+        out = ss.ledger_summary(state)
+        assert out["rate"] < out["fleet_baseline"], "a fleet check would pass this"
+        assert out["rising"] is True, "and it is still getting worse"
+        assert out["baseline"] == 0.025
+
+    def test_an_empty_ledger_says_so_instead_of_returning_a_number(self):
+        out = ss.ledger_summary(ss.empty_state("s"))
+        assert out["rows"] == 0
+        assert out["rate"] is None
+        assert out["rising"] is False
+
+    def test_a_partial_row_is_weighted_by_its_own_denominator(self):
+        """Five calls with two repeats is 40%, not two-fortieths, and the earlier windows are
+        weighted by how much they actually counted."""
+        out = ss.ledger_summary(self._with_rows([(4, 40), (0, 10), (2, 5)]))
+        assert out["rate"] == 0.4
+        assert out["baseline"] == 4 / 50
+
+    # ---- bounded, because every hook reads this file every turn ---------------------------
+    def test_the_rows_are_bounded(self, tmp_path):
+        state = self._with_rows([(1, 40)] * (ss.LEDGER_ROWS + 4))
+        state["ledger_of"] = 1
+        ss._close_ledger_row(state)
+        assert len(state["ledger"]) == ss.LEDGER_ROWS
+
+    def test_the_signature_memory_is_bounded(self, tmp_path):
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        self._derive(state, path, [tool_use("Read", {"file_path": f"f{i}.py"})
+                                   for i in range(ss.LEDGER_SIGS + 60)])
+        assert len(state["facts"]["sigs"]) == ss.LEDGER_SIGS
+
+    def test_a_repeated_call_is_moved_to_the_end_rather_than_duplicated(self, tmp_path):
+        """The bound drops the LEAST recently used signature, so a call made throughout a long
+        window must not age out of its own memory."""
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        self._derive(state, path, [tool_use("Read", {"file_path": "hot.py"}),
+                                   tool_use("Read", {"file_path": "cold.py"}),
+                                   tool_use("Read", {"file_path": "hot.py"})])
+        sigs = state["facts"]["sigs"]
+        assert len(sigs) == 2
+        assert sigs[-1] == ss.call_signature("Read", {"file_path": "hot.py"})
+
+    def test_the_ledger_does_not_reach_the_handback(self, repo, tmp_path):
+        """⚠ The handback has 1,500 tokens for things the next window must ACT on, and a
+        measurement is not one of them. Four hundred signatures reaching it would be the most
+        expensive thing in the budget and the least useful."""
+        path = transcript(tmp_path / "t.jsonl", [])
+        state = ss.empty_state("s")
+        ss.mark_handed_back(state, [])
+        self._derive(state, path, [tool_use("Read", {"file_path": "a.py"})])
+        text = ss.handback(state, repo=repo)["text"]
+        assert state["facts"]["sigs"][0] not in text
+
+
 class TestThePullRequestsThisWindowTouched:
     """⚠ WHY THIS EXISTS. With `autoCompactWindow` at 400,000 instead of 1,000,000, a window
     boundary arrives roughly 2.8x as often, so whatever the handback drops is paid for 2.8x as
@@ -134,7 +364,7 @@ class TestThePullRequestsThisWindowTouched:
     def test_it_is_bounded_so_it_cannot_eat_the_budget(self, tmp_path):
         """A long window can touch many PRs; the handback has 1,500 tokens for everything."""
         path = transcript(tmp_path / "t.jsonl", [
-            tool_result(" ".join("https://github.com/x/y/pull/%d" % i for i in range(40))),
+            tool_result(" ".join(f"https://github.com/x/y/pull/{i}" for i in range(40))),
         ])
         state = ss.empty_state("s")
         facts = ss.derive_facts(state, path)
