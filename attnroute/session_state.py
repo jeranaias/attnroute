@@ -323,6 +323,15 @@ def check_promotion(note: dict, repo: Path | str = ".") -> dict:
             "why": f"{target} exists but mentions only {hits} of the note's terms"}
 
 # ---- the derived layer: only what the transcript states outright ---------------------
+#: A pull-request URL as `gh` prints it when a PR is created or viewed. The NUMBER is what a
+#: resuming window needs; the host and owner are noise once you have it.
+#:
+#: ⚠ MATCHED IN TOOL OUTPUT, NOT IN PROSE. A number this session merely TALKED about is not a
+#:   pull request it touched, and handing one over as though it were would be the guess this
+#:   module refuses to make.
+PR_URL = re.compile(r"https?://[^\s]*?/pull/(\d+)")
+
+
 def derive_facts(state: dict, transcript_path) -> dict:
     """Update `state["facts"]` from the transcript written since the last look.
 
@@ -337,6 +346,7 @@ def derive_facts(state: dict, transcript_path) -> dict:
     facts = state.setdefault("facts", {})
     edited = facts.setdefault("edited", {})
     commands = facts.setdefault("commands", [])
+    prs = facts.setdefault("prs", [])
     #: Tool-call ids already counted. Bounded: the only ones that can overlap a future
     #: span are the recent ones.
     seen_calls = facts.setdefault("seen_calls", [])
@@ -401,9 +411,13 @@ def derive_facts(state: dict, transcript_path) -> dict:
                 found = LINT_RESULT.search(text)
                 if found:
                     facts["last_lint"] = found.group(1)
+                for num in PR_URL.findall(text):
+                    if num not in prs:
+                        prs.append(num)
 
     # Bounded: the handback has 1,500 tokens, so keeping more than this helps nobody.
     facts["commands"] = commands[-8:]
+    facts["prs"] = prs[-6:]
     facts["seen_calls"] = seen_calls[-500:]
     if len(edited) > 40:
         facts["edited"] = dict(sorted(edited.items(), key=lambda kv: -kv[1])[:40])
@@ -525,6 +539,19 @@ def handback(state: dict, board_rows: dict | None = None, repo: Path | str = "."
                        + ", ".join(f"{p} x{n}" for p, n in top)
                        + (f" (+{len(edited) - len(top)} more)" if len(edited) > len(top)
                           else ""))
+    # ⚠⚠ FIRST IN THE DERIVED BLOCK, because it is the fact a resuming window acts on
+    #    SOONEST -- "what did I leave open" is the first question after a compaction, and the
+    #    answer was costing a `gh pr list` every time.
+    #
+    # ⚠⚠ AND IT SAYS THE STATE IS NOT CHECKED, WHICH IS THE WHOLE POINT OF THE LINE. These
+    #    numbers were SEEN in this window's tool output; one of them may have been merged or
+    #    closed since, here or by somebody else. A handback that said "open PRs" would be
+    #    asserting a live fact from a stale observation -- and a merged PR reported as open is
+    #    exactly how a session pushes to a dead branch. Say what was seen; let the reader check.
+    if facts.get("prs"):
+        derived.append("- DERIVED PR(s) seen in this window (state NOT checked -- verify "
+                       "before citing or pushing): "
+                       + ", ".join("#" + n for n in facts["prs"]))
     if facts.get("last_test"):
         derived.append(f"- DERIVED last test result seen: {facts['last_test']}")
     if facts.get("last_lint"):
