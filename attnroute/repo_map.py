@@ -5,7 +5,9 @@ AttnRoute Repo Map - Aider-style symbol-level context.
 Instead of injecting full files (1000s of tokens), we extract and inject
 just the function/class signatures (~50 tokens per file).
 
-This alone can provide 95%+ token reduction while maintaining code understanding.
+The map is 95%+ smaller than the source it summarises while maintaining code
+understanding. That ratio is against the CONCATENATED SOURCE, which nobody ever sends;
+it is not a saving on the bill. `attnroute savings` is the figure that is.
 
 Features:
 - Tree-sitter parsing for 10+ languages
