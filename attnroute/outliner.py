@@ -6,7 +6,8 @@ Extracts structured outlines from source code files using tree-sitter.
 Produces compact summaries with imports + class/function signatures (no bodies).
 
 Features:
-  - ~90% token reduction compared to full file content
+  - ~90% smaller than the full file content it replaces (a property of the OUTLINE,
+    not a saving on the bill -- see `attnroute savings` for the measured effect)
   - Language support: Python, JS/TS, Go, Rust, Java, C/C++
   - Graceful degradation when tree-sitter unavailable
 

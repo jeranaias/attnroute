@@ -844,7 +844,7 @@ def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="attnroute",
-        description="Attentional context routing for Claude Code - 98-99% token reduction",
+        description="Context routing and cost measurement for Claude Code",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Commands:
@@ -860,6 +860,16 @@ Commands:
   attnroute ingest            Bootstrap learner from Claude Code history
   attnroute version           Show version information
   attnroute validate          Validate installation and configuration
+  attnroute savings           Measured effect on the bill, with a confidence interval
+
+WHAT IT SAVES, AS MEASURED RATHER THAN AS CLAIMED:
+  Run `attnroute savings`. As of 2026-10-14, on 14 treated against 12 baseline sessions,
+  it reads 8.2% per turn with a 95% interval of [-40.5%, +13.4%] -- which INCLUDES ZERO,
+  so the effect is NOT ESTABLISHED and must not be quoted as a saving.
+
+  The component ratios in this codebase (an outline ~90% smaller than its file, a repo map
+  95%+ smaller than the concatenated source) are real and are NOT savings: their denominator
+  is content nobody ever sends. Only `savings` has the bill as its denominator.
 
 For more information, visit: https://github.com/jeranaias/attnroute
         """
