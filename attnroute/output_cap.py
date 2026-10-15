@@ -75,8 +75,20 @@ HOLDOUT_ENV = "ATTNROUTE_CAP_HOLDOUT_PCT"
 
 
 def acting() -> bool:
-    """May the cap change a command, or only log what it would have done?"""
-    return os.environ.get(ACT_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+    """May the cap change a command, or only log what it would have done?
+
+    Resolved through `levers`, so a flip in the state file reaches a session that is ALREADY
+    RUNNING on its next hook event. The environment still overrules the file, including when it
+    overrules it to OFF -- see the warning at the top of that module.
+    """
+    from attnroute.levers import resolve
+    return resolve("cap_act")["on"]
+
+
+def acting_source() -> dict:
+    """Which of env/file/default decided, for the telemetry record."""
+    from attnroute.levers import resolve
+    return resolve("cap_act")
 
 
 def outputs_dir() -> Path:
@@ -281,17 +293,24 @@ def handle(payload: dict) -> dict | None:
     cmd = ti["command"]
     arm = arm_for(sid, cmd)
 
+    # Resolved ONCE per event: `acting()` now reads a file, and the three separate calls this
+    # replaced would have been three reads of it. It also guarantees the logged value and the
+    # value acted on are the same one, which two calls either side of a write would not.
+    lever = acting_source()
+    act = lever["on"]
+
     if event == "PostToolUse":
         # The measurement half, and the only half that runs while observing.
         n = len(_result_text(payload))
         would = max(0, _tokens(n) - _tokens(capped_chars(n)))
         _log({"event": "output_cap", "phase": "result", "session_id": sid, "agent_id": aid,
               "chars": n, "would_save_tokens_est": would if n > CAP_CHARS else 0,
-              "capped": bool(acting() and arm["arm"] == "cap" and n > CAP_CHARS),
-              "acting": acting(), **arm})
+              "capped": bool(act and arm["arm"] == "cap" and n > CAP_CHARS),
+              "acting": act, "acting_source": lever["source"],
+              "acting_why": lever["why"] or None, **arm})
         return None
 
-    if event != "PreToolUse" or not acting() or arm["arm"] != "cap":
+    if event != "PreToolUse" or not act or arm["arm"] != "cap":
         return None
 
     try:

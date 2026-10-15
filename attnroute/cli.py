@@ -631,6 +631,51 @@ def cmd_state(args):
     return 0
 
 
+def cmd_lever(args):
+    """Turn a lever on or off for every session on this machine, running ones included.
+
+    The whole point is that it needs NO RESTART. `acting()` always read its switch per decision,
+    but an environment variable reaches only sessions started after it was set -- so turning a
+    lever on for a fleet meant restarting the fleet. This writes a file the hook child reads
+    itself, which lands on the next hook event of every live session.
+    """
+    from attnroute.levers import LEVERS, levers_path, resolve, set_lever
+
+    if args.subcommand == "show":
+        print(f"file: {levers_path()}")
+        for name in sorted(LEVERS):
+            r = resolve(name)
+            state = "ON" if r["on"] else "off"
+            tail = "  -- " + r["why"] if r["why"] else ""
+            print(f"  {name:<12} {state:<3}  ({r['source']}){tail}")
+        return 0
+
+    if not args.name or args.name not in LEVERS:
+        print("name a lever: " + ", ".join(sorted(LEVERS)))
+        return 1
+    if args.value is None:
+        print("say on or off")
+        return 1
+    on = str(args.value).strip().lower() in ("1", "true", "yes", "on")
+    out = set_lever(args.name, on)
+    print(f"[attnroute] {args.name} = {'ON' if on else 'off'} in {out['path']}")
+    if out["lost"]:
+        # Reported rather than hidden: the rollback is allowed to proceed over a corrupt file,
+        # and what it cost has to be said out loud.
+        print("[attnroute] WARNING: the previous file was unreadable; "
+              + ", ".join(out["lost"]) + " returned to default")
+
+    # ⚠ THE EFFECTIVE VALUE, NOT THE ONE JUST WRITTEN. An inherited environment variable
+    #   overrules the file, so a session could read the opposite of what this command reports
+    #   having done -- which is precisely the silent disagreement this print exists to catch.
+    eff = resolve(args.name)
+    if eff["on"] != on:
+        print(f"[attnroute] BUT IT IS {'ON' if eff['on'] else 'off'} HERE: {eff['why']}")
+    print(f"[attnroute] effective: {'ON' if eff['on'] else 'off'} ({eff['source']}). "
+          "Live sessions pick this up on their next hook event.")
+    return 0
+
+
 def cmd_team(args):
     """Say which team this session is, or show what attnroute currently thinks.
 
@@ -861,6 +906,7 @@ Commands:
   attnroute version           Show version information
   attnroute validate          Validate installation and configuration
   attnroute savings           Measured effect on the bill, with a confidence interval
+  attnroute lever             Turn a lever on/off for running sessions, no restart
 
 WHAT IT SAVES, AS MEASURED RATHER THAN AS CLAIMED:
   Run `attnroute savings`. As of 2026-10-14, on 14 treated against 12 baseline sessions,
@@ -984,6 +1030,16 @@ For more information, visit: https://github.com/jeranaias/attnroute
     team_parser.add_argument("--session", type=str, default=None,
                              help="Session id (default: $CLAUDE_SESSION_ID)")
 
+    # lever command
+    lever_parser = subparsers.add_parser(
+        "lever", help="Turn output_cap or the read ledger on/off without restarting sessions")
+    lever_parser.add_argument("subcommand", nargs="?", default="show",
+                              choices=["set", "show"])
+    lever_parser.add_argument("name", nargs="?", default=None,
+                              help="cap_act or ledger_act (set only)")
+    lever_parser.add_argument("value", nargs="?", default=None,
+                              help="on or off (set only)")
+
     # board command
     board_parser = subparsers.add_parser(
         "board", help="Read or publish a row on the shared team board")
@@ -1051,6 +1107,7 @@ For more information, visit: https://github.com/jeranaias/attnroute
         "plugins": cmd_plugins,
         "board": cmd_board,
         "team": cmd_team,
+        "lever": cmd_lever,
         "note": cmd_note,
         "state": cmd_state,
         "ingest": cmd_ingest,

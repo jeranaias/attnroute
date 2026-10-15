@@ -318,8 +318,13 @@ TURN_HOLDOUT_ENV = "ATTNROUTE_LEDGER_TURN_HOLDOUT_PCT"
 
 
 def acting() -> bool:
-    """May the ledger change a read, or only log what it would have done?"""
-    return os.environ.get(ACT_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+    """May the ledger change a read, or only log what it would have done?
+
+    Through `levers`, for the same reason as the cap: a flip must reach a session that is
+    already running, and an environment variable cannot.
+    """
+    from attnroute.levers import resolve
+    return resolve("ledger_act")["on"]
 
 
 def holdout_pct(env_name: str, default: int) -> tuple:
