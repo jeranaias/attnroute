@@ -64,15 +64,17 @@ if PLUGINS_AVAILABLE:
 
 # Import learner with lazy initialization (avoids side effects at import time)
 _learner_imports, _LEARNER_IMPORTABLE = try_import(
-    "attnroute.learner", "learner", ["Learner", "auto_extract_keywords"]
+    "attnroute.learner", "learner", ["Learner", "auto_extract_keywords", "repo_namespace_id"]
 )
 if _LEARNER_IMPORTABLE:
     Learner = _learner_imports["Learner"]
     auto_extract_keywords = _learner_imports["auto_extract_keywords"]
+    repo_namespace_id = _learner_imports["repo_namespace_id"]
     _learner_loader = LazyLoader(lambda: Learner())
     LEARNER_AVAILABLE = True
 else:
     _learner_loader = None
+    repo_namespace_id = None
     LEARNER_AVAILABLE = False
 
 def get_learner():
@@ -80,6 +82,15 @@ def get_learner():
     if _learner_loader is None:
         return None
     return _learner_loader.get()
+
+def _current_repo_id() -> str | None:
+    """Return deterministic namespace ID for the current repository (no subprocess)."""
+    if repo_namespace_id is None:
+        return None
+    try:
+        return repo_namespace_id(Path.cwd())
+    except Exception:
+        return None
 
 # Import search index with lazy initialization
 # ═══ THE SEARCH INDEX IS IMPORTED ONLY IF A PROMPT ACTUALLY SEARCHES ═══════════════════
@@ -820,11 +831,12 @@ def build_bidirectional_coactivation(co_act: dict) -> dict:
 
 CO_ACTIVATION = build_bidirectional_coactivation(CO_ACTIVATION)
 
-# Merge learned co-activation from the intelligence engine
+# Merge learned co-activation from the intelligence engine (scoped to current repo)
 if LEARNER_AVAILABLE:
     _learner_instance = get_learner()
     if _learner_instance is not None:  # C2: Guard against None if Learner init fails
-        _learned_coact = _learner_instance.get_learned_coactivation()
+        _repo_id = _current_repo_id()
+        _learned_coact = _learner_instance.get_learned_coactivation(repo_id=_repo_id)
         for source, targets in _learned_coact.items():
             if source not in CO_ACTIVATION:
                 CO_ACTIVATION[source] = []
@@ -1249,28 +1261,12 @@ def observe_tool_calls(state: dict, tool_calls: list[dict],
             else:
                 CO_ACTIVATION[b] = [a]
 
-    # Persist co-access edges through the learner (fixes silent data loss bug)
+    # Persist co-access edges through the learner (scoped per repository)
     if len(accessed_list) >= 2 and LEARNER_AVAILABLE:
         try:
             learner = get_learner()
             if learner is not None:
-                learned_coact = learner.state.get("coactivation_learned", {})
-                changed = False
-                for i, a in enumerate(accessed_list):
-                    for b in accessed_list[i + 1:]:
-                        if a not in learned_coact:
-                            learned_coact[a] = []
-                        if b not in learned_coact[a]:
-                            learned_coact[a].append(b)
-                            changed = True
-                        if b not in learned_coact:
-                            learned_coact[b] = []
-                        if a not in learned_coact[b]:
-                            learned_coact[b].append(a)
-                            changed = True
-                if changed:
-                    learner.state["coactivation_learned"] = learned_coact
-                    learner._save()
+                learner.record_coactivation(accessed_list, repo_id=_current_repo_id())
         except Exception:
             pass  # Never crash the Stop hook
 

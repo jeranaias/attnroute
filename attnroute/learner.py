@@ -23,6 +23,7 @@ The learner runs automatically:
 
 from attnroute.used_signal import trust_used_signal
 
+import hashlib
 import json
 import re
 import sys
@@ -270,6 +271,68 @@ def build_file_relationship_map(claude_dir: Path | None = None) -> dict[str, dic
 
 
 # ============================================================================
+# REPO NAMESPACE IDENTIFICATION
+# ============================================================================
+
+def repo_namespace_id(repo_path: str | Path) -> str:
+    """Return a deterministic, human-readable namespace key for a repository path.
+
+    Walks up to the nearest ``.git`` marker when the path exists on disk (resolving
+    git worktrees to their shared parent repository when possible), then returns
+    ``"<slug>-<sha256[:12]>"``. Pure stdlib with zero subprocess overhead so hooks
+    stay within latency budgets.
+    """
+    raw = str(repo_path).strip()
+    if not raw:
+        return "default-000000000000"
+
+    canonical_str: str
+    slug_source: str
+
+    try:
+        p = Path(raw)
+        if p.exists():
+            resolved = p.resolve()
+            anchor = resolved if resolved.is_dir() else resolved.parent
+            # Walk up to nearest .git directory or worktree .git file
+            cur = anchor
+            while True:
+                git_marker = cur / ".git"
+                if git_marker.is_dir():
+                    anchor = cur
+                    break
+                if git_marker.is_file():
+                    anchor = cur
+                    try:
+                        first_line = git_marker.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+                        if first_line.lower().startswith("gitdir:"):
+                            gitdir = Path(first_line.split(":", 1)[1].strip())
+                            if not gitdir.is_absolute():
+                                gitdir = (cur / gitdir).resolve()
+                            # Worktree layout: <common>/.git/worktrees/<name>
+                            if gitdir.parent.name == "worktrees" and gitdir.parent.parent.name == ".git":
+                                anchor = gitdir.parent.parent.parent.resolve()
+                    except OSError:
+                        pass
+                    break
+                if cur.parent == cur:
+                    break
+                cur = cur.parent
+            canonical_str = str(anchor).replace("\\", "/").rstrip("/").lower()
+            slug_source = anchor.name
+        else:
+            canonical_str = raw.replace("\\", "/").rstrip("/").lower()
+            slug_source = canonical_str.rsplit("/", 1)[-1]
+    except OSError:
+        canonical_str = raw.replace("\\", "/").rstrip("/").lower()
+        slug_source = canonical_str.rsplit("/", 1)[-1]
+
+    slug = re.sub(r"[^a-z0-9_-]+", "-", slug_source.lower()).strip("-")[:24] or "repo"
+    digest = hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()[:12]
+    return f"{slug}-{digest}"
+
+
+# ============================================================================
 # LEARNER
 # ============================================================================
 
@@ -279,7 +342,7 @@ class Learner:
 
     Learns from historical turn data to:
     1. Discover which prompt words predict which files being useful
-    2. Find files that frequently appear together (co-activation)
+    2. Find files that frequently appear together (co-activation), scoped per repo
     3. Learn per-file decay rates from user revisit patterns
     4. Remember session context for warm-start continuity
 
@@ -290,7 +353,8 @@ class Learner:
     - Rare/discriminative words weighted higher (IDF-style)
     """
 
-    def __init__(self):
+    def __init__(self, repo_id: str | None = None):
+        self.repo_id: str | None = repo_id
         self.state = self._load()
         self.maturity = self._compute_maturity()
 
@@ -307,7 +371,8 @@ class Learner:
             },
             "prompt_file_affinity": {},     # word → {file → score}
             "word_frequency": {},           # word → fraction of turns containing it
-            "coactivation_learned": {},     # file → [related files]
+            "coactivation_learned": {},     # legacy global file → [related files]
+            "coactivation_by_repo": {},     # repo_id → {file → [related files]}
             "file_rhythm": {},              # file → learned decay rate
             "session_memory": {},           # file → score from last session
             "discoveries": [],              # recent notable learned associations
@@ -354,7 +419,7 @@ class Learner:
 
     # ---- Learning (called by optimizer every 10-50 turns) ----
 
-    def learn_from_turns(self, turns: list):
+    def learn_from_turns(self, turns: list, repo_id: str | None = None):
         """
         Core learning cycle. Analyzes turn history to update all learned models.
 
@@ -362,7 +427,7 @@ class Learner:
         Each cycle:
         1. Decays old associations (preventing stale knowledge)
         2. Learns new prompt→file associations from successful matches
-        3. Discovers co-activation patterns
+        3. Discovers co-activation patterns (namespaced per repository when known)
         4. Calibrates per-file decay rates from revisit rhythms
         5. Computes word frequency for IDF dampening
         """
@@ -374,6 +439,8 @@ class Learner:
         if len(usable) < 5:
             return
 
+        effective_repo_id = repo_id if repo_id is not None else self.repo_id
+
         # Phase 1: Decay old associations
         self._decay_associations()
 
@@ -381,7 +448,7 @@ class Learner:
         self._learn_prompt_associations(usable)
 
         # Phase 3: Learn co-activation patterns
-        self._learn_coactivation(usable)
+        self._learn_coactivation(usable, repo_id=effective_repo_id)
 
         # Phase 4: Learn file revisit rhythms
         self._learn_file_rhythms(usable)
@@ -481,30 +548,22 @@ class Learner:
         existing = self.state.get("discoveries", [])
         self.state["discoveries"] = (existing + discoveries)[-20:]
 
-    def _learn_coactivation(self, turns: list):
-        """
-        Discover files that frequently appear HOT together.
-
-        Uses Jaccard similarity: J(A,B) = |A∩B| / |A∪B|
-        If two files co-occur in >25% of turns where either appears,
-        they get a learned co-activation edge.
-        """
-        # Count co-occurrences
-        file_turns = defaultdict(set)       # file → set of turn indices
-        pair_turns = defaultdict(set)       # (file_a, file_b) → set of turn indices
+    @staticmethod
+    def _compute_coactivation_graph(turns: list) -> dict[str, list[str]]:
+        """Compute symmetric Jaccard co-activation adjacency map for a turn sequence."""
+        file_turns: dict[str, set[int]] = defaultdict(set)
+        pair_turns: dict[tuple[str, str], set[int]] = defaultdict(set)
 
         for i, turn in enumerate(turns):
             hot_files = (turn.get("files_injected") or [])[:6]  # Top files only
             for f in hot_files:
                 file_turns[f].add(i)
-            # Track pairs
             for a in hot_files:
                 for b in hot_files:
                     if a < b:  # Canonical ordering
                         pair_turns[(a, b)].add(i)
 
-        # Compute Jaccard similarity
-        coactivation = defaultdict(list)
+        coactivation: dict[str, list[str]] = defaultdict(list)
         for (a, b), shared_turns in pair_turns.items():
             union = len(file_turns[a] | file_turns[b])
             if union == 0:
@@ -514,10 +573,50 @@ class Learner:
                 coactivation[a].append(b)
                 coactivation[b].append(a)
 
-        # Deduplicate
-        self.state["coactivation_learned"] = {
-            k: sorted(set(v)) for k, v in coactivation.items()
-        }
+        return {k: sorted(set(v)) for k, v in coactivation.items()}
+
+    def _learn_coactivation(self, turns: list, repo_id: str | None = None):
+        """
+        Discover files that frequently appear HOT together.
+
+        Uses Jaccard similarity: J(A,B) = |A∩B| / |A∪B|
+        If two files co-occur in >25% of turns where either appears,
+        they get a learned co-activation edge.
+
+        When ``repo_id`` is provided, or when turns carry a ``project`` field,
+        edges are computed and stored inside ``coactivation_by_repo[rid]`` so
+        different repositories never pollute each other's co-activation graph.
+        """
+        by_repo = self.state.setdefault("coactivation_by_repo", {})
+
+        if repo_id is not None:
+            by_repo[repo_id] = self._compute_coactivation_graph(turns)
+            return
+
+        # Group by turn["project"] when present to isolate repositories automatically
+        has_projects = any(t.get("project") for t in turns)
+        if has_projects:
+            buckets: dict[str | None, list] = defaultdict(list)
+            for turn in turns:
+                proj = turn.get("project")
+                rid = repo_namespace_id(proj) if proj else None
+                buckets[rid].append(turn)
+
+            combined_global: dict[str, set[str]] = defaultdict(set)
+            for rid, bucket_turns in buckets.items():
+                graph = self._compute_coactivation_graph(bucket_turns)
+                if rid is not None:
+                    by_repo[rid] = graph
+                for src, targets in graph.items():
+                    combined_global[src].update(targets)
+
+            self.state["coactivation_learned"] = {
+                k: sorted(v) for k, v in combined_global.items()
+            }
+            return
+
+        # Legacy unlabelled turns
+        self.state["coactivation_learned"] = self._compute_coactivation_graph(turns)
 
     def _learn_file_rhythms(self, turns: list):
         """
@@ -626,9 +725,77 @@ class Learner:
 
         return scores
 
-    def get_learned_coactivation(self) -> dict:
-        """Return learned co-activation graph for merging with config."""
-        return self.state.get("coactivation_learned", {})
+    def record_coactivation(
+        self,
+        files: list[str],
+        *,
+        repo_id: str | None = None,
+        save: bool = True,
+    ) -> bool:
+        """Persist bidirectional co-access edges for a set of files.
+
+        When ``repo_id`` (or ``self.repo_id``) is set, edges are recorded inside
+        ``coactivation_by_repo[repo_id]`` so co-accessed files never bleed across
+        repositories. Otherwise falls back to legacy ``coactivation_learned``.
+        """
+        unique_files = list(dict.fromkeys(f for f in files if f))
+        if len(unique_files) < 2:
+            return False
+
+        effective_repo_id = repo_id if repo_id is not None else self.repo_id
+        if effective_repo_id is not None:
+            by_repo = self.state.setdefault("coactivation_by_repo", {})
+            graph = by_repo.setdefault(effective_repo_id, {})
+        else:
+            graph = self.state.setdefault("coactivation_learned", {})
+
+        changed = False
+        for i, a in enumerate(unique_files):
+            for b in unique_files[i + 1:]:
+                if a == b:
+                    continue
+                if a not in graph:
+                    graph[a] = []
+                if b not in graph[a]:
+                    graph[a].append(b)
+                    changed = True
+                if b not in graph:
+                    graph[b] = []
+                if a not in graph[b]:
+                    graph[b].append(a)
+                    changed = True
+
+        if changed and save:
+            self._save()
+        return changed
+
+    def get_learned_coactivation(
+        self,
+        repo_id: str | None = None,
+        *,
+        include_global: bool = False,
+    ) -> dict:
+        """Return learned co-activation graph for merging with config.
+
+        When ``repo_id`` (or ``self.repo_id``) is provided, returns only that
+        repository's isolated co-activation graph by default. Set
+        ``include_global=True`` to union with legacy global edges.
+        When neither is provided, returns the legacy global graph.
+        """
+        effective_repo_id = repo_id if repo_id is not None else self.repo_id
+        if effective_repo_id is None:
+            return self.state.get("coactivation_learned", {})
+
+        scoped = self.state.get("coactivation_by_repo", {}).get(effective_repo_id, {})
+        if not include_global:
+            return {k: list(v) for k, v in scoped.items()}
+
+        merged: dict[str, set[str]] = defaultdict(set)
+        for src, targets in self.state.get("coactivation_learned", {}).items():
+            merged[src].update(targets)
+        for src, targets in scoped.items():
+            merged[src].update(targets)
+        return {k: sorted(v) for k, v in merged.items()}
 
     def get_file_decay(self, file: str) -> float | None:
         """
@@ -870,6 +1037,21 @@ class Learner:
                     existing_set.add(r)
         self.state["coactivation_learned"] = existing_coact
 
+        # Per-repo co-activation: union per repository namespace
+        existing_by_repo = self.state.setdefault("coactivation_by_repo", {})
+        for rid, repo_graph in ingested.get("coactivation_by_repo", {}).items():
+            if not isinstance(repo_graph, dict):
+                continue
+            target_graph = existing_by_repo.setdefault(rid, {})
+            for f, related in repo_graph.items():
+                if f not in target_graph:
+                    target_graph[f] = []
+                seen_rel = set(target_graph[f])
+                for r in related:
+                    if r not in seen_rel:
+                        target_graph[f].append(r)
+                        seen_rel.add(r)
+
         # File rhythm: prefer existing
         existing_rhythm = self.state.get("file_rhythm", {})
         for f, decay in ingested.get("file_rhythm", {}).items():
@@ -909,7 +1091,10 @@ class Learner:
         """One-line summary for the session dashboard."""
         turns = self.state["meta"].get("turns_learned", 0)
         n_assoc = sum(len(v) for v in self.state.get("prompt_file_affinity", {}).values())
-        n_coact = len(self.state.get("coactivation_learned", {}))
+        n_coact = len(self.state.get("coactivation_learned", {})) + sum(
+            len(g) for g in self.state.get("coactivation_by_repo", {}).values()
+            if isinstance(g, dict)
+        )
         n_rhythm = len(self.state.get("file_rhythm", {}))
 
         parts = []
