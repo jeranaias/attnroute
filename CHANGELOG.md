@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-19
+
 ### Added
 - **Session State & Safe Compaction Handback (`attnroute.session_state`)**: Hard-budgeted 1,500-token compaction handback separating explicit rulings (`attnroute note add|rm|amend`) from verbatim transcript facts (edited files, last test result, PRs touched, commits/pushes), plus 80% compaction boundary alerts and compliance tracking (`attnroute state show|handback`).
 - **Session Read Ledger (`attnroute.read_ledger`)**: Tracks files read per context window and whether they changed on disk to cut redundant same-window file re-reads.
