@@ -5,6 +5,26 @@ All notable changes to attnroute will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Session State & Safe Compaction Handback (`attnroute.session_state`)**: Hard-budgeted 1,500-token compaction handback separating explicit rulings (`attnroute note add|rm|amend`) from verbatim transcript facts (edited files, last test result, PRs touched, commits/pushes), plus 80% compaction boundary alerts and compliance tracking (`attnroute state show|handback`).
+- **Session Read Ledger (`attnroute.read_ledger`)**: Tracks files read per context window and whether they changed on disk to cut redundant same-window file re-reads.
+- **Bash Output Cap (`attnroute.output_cap`)**: Head+tail capping for verbose Bash tool output while saving full logs to `~/.claude/telemetry/outputs/` and preserving exit status and `cd` state without altering permission flow.
+- **Structural 1-Hop Repo Edges & Repo-Scoped Co-Activation (`attnroute.repo_map`, `attnroute.learner`)**: Lightweight stdlib `structural_edges` / `reverse_structural_edges` populated during the single-pass repo walk with zero `networkx` import cost, plus per-repo co-activation scoping to avoid cross-repository bleeding.
+- **Bill-Denominated Savings Measurement (`attnroute savings`)**: Measures treated vs. baseline sessions directly from Claude transcript usage with 95% confidence intervals, paired with regression tests (`tests/test_claims_are_measured.py`) preventing unmeasured headline claims.
+- **Live Levers (`attnroute lever`) & Holdout Controls**: Toggle `cap_act` and `ledger_act` across already-running sessions via `~/.claude/attn_state/levers.json` without restarting Claude Code.
+- **Multi-Machine Team Board (`attnroute board`, `attnroute team`)**: Orphan-branch shared status board (one file per writer) with local-only reads and explicit/CWD team attribution.
+- **Zero-Egress Verification (`attnroute.no_egress`) & Hands-Off Plan (`docs/HANDS-OFF-PLAN.md`)**.
+
+### Changed
+- **PEP 562 Lazy Top-Level Imports (`attnroute/__init__.py`)**: Deferred heavy optional imports (`chromadb`, `opentelemetry`) out of hook startup so per-tool hooks stay within latency budget.
+- **Python 3.13+ Optional Extra Compatibility (`pyproject.toml`)**: Gated `tree-sitter-languages>=1.10.0` behind `python_version < '3.13'` so `pip install attnroute[all]` and `attnroute[graph]` resolve cleanly on Python 3.10–3.14 (falling back to regex outlining on 3.13+).
+- **Degraded-Capability Visibility**: `attnroute status` now reports every capability and explicitly explains any degraded fallback.
+
+### Fixed
+- Isolated `tests/test_output_cap.py::TestHookPayload::test_observe_by_default_changes_nothing` from local `~/.claude/attn_state/levers.json`.
+
 ## [1.0.2] - 2026-02-26
 
 ### Fixed

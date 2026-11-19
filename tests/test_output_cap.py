@@ -90,8 +90,10 @@ class TestHookPayload:
         ui = out["hookSpecificOutput"]["updatedInput"]
         assert ui["timeout"] == 1234 and ui["description"] == "d"
 
-    def test_observe_by_default_changes_nothing(self, monkeypatch):
+    def test_observe_by_default_changes_nothing(self, monkeypatch, tmp_path):
         monkeypatch.delenv(oc.ACT_ENV, raising=False)
+        monkeypatch.setattr(oc.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr("attnroute.levers.Path.home", lambda: tmp_path)
         assert oc.handle(_pre("echo hi")) is None
 
     def test_held_out_command_is_left_alone(self, act, monkeypatch):

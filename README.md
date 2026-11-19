@@ -1,6 +1,6 @@
 <h1 align="center">attnroute</h1>
-<h3 align="center">Intelligent Context Routing for Claude Code</h3>
-<p align="center"><strong>Intelligent Context Selection | Fast per-prompt injection | Zero Config Required</strong></p>
+<h3 align="center">Context Routing, Session Handback, and Cost Measurement for Claude Code</h3>
+<p align="center"><strong>Smart Context Selection | Safe Compaction Handback | Zero-Egress Local Hooks</strong></p>
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -9,13 +9,14 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Smart_Context-Injection-brightgreen.svg" alt="Smart Context Injection">
-  <img src="https://img.shields.io/badge/Latency-95--309ms-blue.svg" alt="Latency: 95-309ms">
-  <img src="https://img.shields.io/badge/Zero_Config-Required-blueviolet.svg" alt="Zero Config">
+  <img src="https://img.shields.io/badge/Smart_Context-Routing-brightgreen.svg" alt="Smart Context Routing">
+  <img src="https://img.shields.io/badge/Zero_Egress-Local_Only-blue.svg" alt="Zero Egress">
+  <img src="https://img.shields.io/badge/Zero_Deps-Core-blueviolet.svg" alt="Zero Deps Core">
 </p>
 
 <p align="center">
   <strong><a href="#quick-start">Quick Start</a></strong> ·
+  <strong><a href="#session-hygiene--cost-levers">Cost Levers</a></strong> ·
   <strong><a href="#how-it-works">How It Works</a></strong> ·
   <strong><a href="#benchmarks">Benchmarks</a></strong> ·
   <strong><a href="#cli-reference">CLI Reference</a></strong>
@@ -93,31 +94,62 @@ After attnroute:   Pre-selected relevant context injected (~2K tokens vs. full c
 
 ---
 
-attnroute is a **hook system for [Claude Code](https://github.com/anthropics/claude-code)** that automatically injects smart context into every prompt. Instead of Claude spending tool calls searching for relevant files, it gets the right files and symbols pre-loaded (thousands of tokens, fast).
+attnroute is a **local, zero-egress hook suite for [Claude Code](https://github.com/anthropics/claude-code)** that combines intelligent context routing, behavioral guardrails, safe compaction handbacks, and transcript-verified cost measurement.
 
-**The core innovation**: attnroute maintains a "working memory" of your codebase—tracking which files you interact with, learning co-activation patterns, and using PageRank on dependency graphs to rank importance.
+**What it does across a session**:
+- **Smart context routing**: Tracks working memory with heat decay, repo-scoped co-activation learning, structural 1-hop import/caller/middleware edges, and PageRank over dependency graphs—injecting compact outlines instead of full source files.
+- **Session hygiene & cost levers**: Keeps compaction safe with explicit rulings + verbatim derived facts (`session_state`), catches same-window redundant file re-reads (`read_ledger`), and caps verbose Bash tool output (`output_cap`) without losing logs or exit status.
+- **Honest measurement**: `attnroute savings` measures treated vs. baseline sessions directly against your real Claude transcript bill with 95% confidence intervals—never confusing component compression ratios with bill savings.
 
-**Source code routing** (v0.7+): The search index covers your actual source tree, not just `.claude/*.md` docs. Source files matched by BM25 get tree-sitter outline injection (function signatures, class definitions, imports)—not raw file content. No config needed—just works.
+### Measured Scope & Performance
 
-### Verified Performance
+| Metric | Value | Notes |
+|--------|-------|-------|
+| **Component Compression** | 99.87% (Go, 556 files), 97.82% (Python, 30 files) | Ratio vs. all files concatenated (*not* a bill-saving claim) |
+| **Bill-Denominated Measurement** | Run `attnroute savings` | Compares treated vs. baseline transcript usage with 95% CI |
+| **Hook Startup** | PEP 562 lazy imports | Heavy optional deps (`chromadb`, etc.) never load on hook paths |
+| **Network Egress** | Zero (`no_egress.py`) | All routing, ledgers, and state stay 100% local |
+| **Memory Overhead** | <100MB runtime footprint | Core package has zero required dependencies |
 
-| Metric | Value |
-|--------|-------|
-| **Context Compression** | 99.87% (Go, 556 files), 97.82% (Python, 30 files) |
-| **Latency** | ~180ms warm per prompt (cold start higher with indexing) |
-| **Context Precision** | HOT files get full content, WARM get symbols only |
-| **Memory Overhead** | <100MB runtime footprint |
+> **Honest Claim Discipline**: Component compression ratios (outlines ~90% smaller than raw files, repo maps 95%+ smaller than concatenated source) measure *compression against theoretical max*, not what Claude Code would otherwise send. Run `attnroute savings` to measure actual bill impact on your own transcripts. See [Benchmarks](#benchmarks) for methodology details.
 
-> **Note**: Compression is measured against all source files concatenated (theoretical maximum).
-> Claude Code selectively reads files via tool calls, so real-world savings depend on your
-> workflow. See [Benchmarks](#benchmarks) for methodology details.
+---
+
+## Session Hygiene & Cost Levers
+
+Beyond per-prompt context routing, attnroute ships dedicated lifecycle hooks designed around where real Claude Code sessions spend tokens:
+
+| Module | Claude Hooks | What It Does |
+|--------|--------------|--------------|
+| **`session_state`** | `SessionStart`, `PreCompact`, `Stop` | Builds a hard-budgeted 1,500-token compaction handback split into **Explicit Rulings** (`attnroute note add --kind ruling "..."`) and **Derived Facts** (edited files, last test output, PRs touched, commits/pushes)—never hallucinating inferred summaries. Also alerts before auto-compaction lands. |
+| **`read_ledger`** | `PreToolUse` / `PostToolUse` (`Read\|Edit\|Write`) | Tracks which files were read in the current window and whether they changed on disk to surface and curb redundant same-window re-reads. |
+| **`output_cap`** | `PreToolUse` / `PostToolUse` (`Bash`) | Caps massive Bash stdout to head + larger tail (preserving tracebacks and test summaries), saves the complete output under `~/.claude/telemetry/outputs/`, and keeps real exit codes and `cd` state intact. |
+| **`levers`** | Live toggle (`attnroute lever`) | Flips `cap_act` and `ledger_act` across already-running sessions via `~/.claude/attn_state/levers.json`—no Claude Code restart required. |
+| **`board` / `team`** | Multi-session CLI | Local-read, orphan-branch shared team status board (one file per writer) with explicit or CWD-derived team attribution. |
+
+```bash
+# Pin a ruling so /compact never loses it
+attnroute note add --kind ruling "Use optimistic locking on refresh_tokens"
+
+# Inspect the exact handback your next compaction will receive
+attnroute state handback
+
+# Flip levers on/off for live sessions without restarting Claude Code
+attnroute lever show
+attnroute lever set cap_act on
+attnroute lever set ledger_act on
+
+# Check measured impact against your actual transcript bill
+attnroute savings
+```
 
 ---
 
 ## Table of Contents
 
 1. [Plugins in Action](#plugins-in-action)
-2. [The Problem](#the-problem)
+2. [Session Hygiene & Cost Levers](#session-hygiene--cost-levers)
+3. [The Problem](#the-problem)
 3. [How It Works](#how-it-works)
    - [Attention Tracking](#attention-tracking)
    - [Heat Decay](#heat-decay)
@@ -479,13 +511,14 @@ pip install attnroute[graph]
 # With Claude API memory compression
 pip install attnroute[compression]
 
-# Everything (Python 3.10-3.13 only — tree-sitter has no 3.14 wheels yet)
+# Everything (works on Python 3.10–3.14; tree-sitter-languages auto-skips on 3.13+)
 pip install attnroute[all]
 ```
 
-> **Python 3.14**: Use `pip install attnroute` (base install). The `[all]` and `[graph]` extras
-> require `tree-sitter-languages` which doesn't have Python 3.14 wheels yet.
-> The core works fine on 3.14 with a regex fallback for AST parsing.
+> **Python 3.13 / 3.14**: `pip install attnroute[all]` and `attnroute[graph]` resolve cleanly on
+> Python 3.13+ because `tree-sitter-languages` is environment-marked for `< 3.13`. On 3.13+,
+> source outlining automatically falls back to the built-in regex outliner and `attnroute status`
+> explicitly reports the active backend.
 
 #### Dependency Breakdown
 
@@ -506,7 +539,7 @@ attnroute status
 # Output:
 # attnroute Status
 # ══════════════════════════════════════════════════════════════
-# Version: 1.0.1
+# Version: 1.0.2
 # Features:
 #   ✓ BM25 search
 #   ✓ Semantic search
@@ -535,23 +568,38 @@ attnroute works invisibly in the background. Every prompt you send automatically
 
 ```bash
 # Setup & Status
-attnroute init              # Set up hooks for current project
-attnroute status            # Show configuration and features
-attnroute validate          # Verify installation is working
-attnroute version           # Show version info
+attnroute init                              # Set up hooks for current project
+attnroute status                            # Show capabilities (including degraded fallbacks)
+attnroute validate                          # Verify installation is working
+attnroute version                           # Show version info
 
-# Reporting
-attnroute report            # Token efficiency metrics
-attnroute history           # View attention history
-attnroute history --last 10 # Last 10 entries
+# Session State, Rulings & Live Levers
+attnroute note add --kind ruling "..."      # Pin a ruling so /compact cannot lose it
+attnroute note amend <id> "..."             # Supersede an existing note
+attnroute note rm <id>                      # Delete a note
+attnroute state show                        # Inspect session state and note IDs
+attnroute state handback                    # Preview the budgeted compaction handback
+attnroute lever show                        # Show active state of cap_act / ledger_act
+attnroute lever set cap_act on              # Toggle a lever live without restarting sessions
 
-# Testing
-attnroute benchmark         # Run performance benchmarks
-attnroute diagnostic        # Generate bug report
+# Measurement & Reporting
+attnroute savings                           # Measured bill impact (treated vs. baseline + 95% CI)
+attnroute report [--days 7]                 # Efficiency metrics and telemetry summary
+attnroute history [--last 20]               # View attention history
+attnroute plugins [list|status|enable|disable]
 
-# Optional Features (require dependencies)
-attnroute graph stats       # Dependency graph info
-attnroute compress stats    # Memory compression stats
+# Multi-Session Coordination
+attnroute team show                         # Show resolved team attribution
+attnroute team set <name>                   # Explicitly declare this session's team
+attnroute board [list|get|set]              # Read or publish on the orphan-branch team board
+
+# Benchmarks, Diagnostics & Optional Features
+attnroute benchmark                         # Run performance benchmarks
+attnroute diagnostic                        # Generate bug report
+attnroute warmup --analyze                  # Pre-analyze project structure
+attnroute ingest                            # Bootstrap learner from Claude Code history
+attnroute graph stats                       # Dependency graph & structural 1-hop edge stats
+attnroute compress stats                    # Memory compression stats
 ```
 
 ### Python API
