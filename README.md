@@ -1,5 +1,5 @@
 <h1 align="center">attnroute</h1>
-<h3 align="center">Context Routing, Session Handback, and Cost Measurement for Claude Code</h3>
+<h3 align="center">Context Routing, Session Handback, and Cost Measurement for Claude Code &amp; Antigravity</h3>
 <p align="center"><strong>Smart Context Selection | Safe Compaction Handback | Zero-Egress Local Hooks</strong></p>
 
 <p align="center">
@@ -539,7 +539,7 @@ attnroute status
 # Output:
 # attnroute Status
 # ══════════════════════════════════════════════════════════════
-# Version: 1.1.0
+# Version: 1.2.0
 # Features:
 #   ✓ BM25 search
 #   ✓ Semantic search
@@ -568,7 +568,11 @@ attnroute works invisibly in the background. Every prompt you send automatically
 
 ```bash
 # Setup & Status
-attnroute init                              # Set up hooks for current project
+attnroute init                              # Auto-detect & configure Claude Code and/or Antigravity hooks
+attnroute init --target claude              # Install Claude Code hooks only (~/.claude/settings.json)
+attnroute init --target agy                 # Install Antigravity hooks only (~/.gemini/config/hooks.json)
+attnroute init --target agy --project-local # Write Antigravity hooks to ./.agents/hooks.json
+attnroute init --target all                 # Install hooks for both Claude Code and Antigravity
 attnroute status                            # Show capabilities (including degraded fallbacks)
 attnroute validate                          # Verify installation is working
 attnroute version                           # Show version info

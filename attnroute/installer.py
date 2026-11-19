@@ -25,7 +25,7 @@ try:
     from attnroute.telemetry_lib import windows_utf8_io
     windows_utf8_io()
 except ImportError:
-    VERSION = "1.1.0"
+    VERSION = "1.2.0"
     # Fallback UTF-8 setup for Windows
     if sys.platform == "win32":
         for stream in (sys.stdout, sys.stderr):
@@ -110,8 +110,80 @@ def maybe_build_search_index():
 
 
 SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
+AGY_HOOKS_FILE = Path.home() / ".gemini" / "config" / "hooks.json"
 TELEMETRY_DIR = Path.home() / ".claude" / "telemetry"
 SCRIPTS_DIR = Path(__file__).parent.parent  # scripts/ dir (parent of attnroute/)
+
+
+def detect_runtimes() -> dict:
+    """Detect which supported AI coding runtimes are present on this machine."""
+    home = Path.home()
+    has_claude = (home / ".claude").exists() or shutil.which("claude") is not None
+    has_agy = (
+        (home / ".gemini" / "config").exists()
+        or (home / ".gemini" / "antigravity").exists()
+        or shutil.which("agy") is not None
+    )
+    return {"claude": has_claude, "agy": has_agy}
+
+
+def build_agy_hooks(python_cmd: str) -> dict:
+    """Build the Antigravity (`hooks.json`) entry for attnroute.
+
+    Follows Antigravity's `hooks.json` contract:
+      - Flat handler arrays for SessionStart, PreInvocation, Stop
+      - Matcher-grouped handler arrays for PreToolUse, PostToolUse
+    """
+    cmd = f"{python_cmd} -m attnroute.agy_hook"
+    handler = {"type": "command", "command": cmd, "timeout": 10}
+    return {
+        "enabled": True,
+        "SessionStart": [dict(handler)],
+        "PreInvocation": [dict(handler)],
+        "PreToolUse": [
+            {
+                "matcher": "read_file|view_file|run_command",
+                "hooks": [dict(handler)],
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": (
+                    "read_file|view_file|edit_file|write_file|write_to_file|"
+                    "replace_file_content|multi_replace_file_content"
+                ),
+                "hooks": [dict(handler)],
+            }
+        ],
+        "Stop": [dict(handler)],
+    }
+
+
+def merge_agy_hooks(existing: dict, attnroute_entry: dict) -> dict:
+    """Merge the attnroute hook group into an existing Antigravity hooks.json."""
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged["attnroute"] = attnroute_entry
+    return merged
+
+
+def install_agy_hooks(python_cmd: str, hooks_file: Path | None = None) -> Path:
+    """Install or update attnroute hooks in Antigravity's hooks.json."""
+    target = hooks_file if hooks_file is not None else AGY_HOOKS_FILE
+    existing = {}
+    if target.exists():
+        try:
+            parsed = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                existing = parsed
+                backup = target.with_suffix(".json.bak")
+                backup.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+                print(f"  AGY backup: {backup}")
+        except Exception:
+            pass
+    merged = merge_agy_hooks(existing, build_agy_hooks(python_cmd))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    return target
 
 # Pool scripts that live alongside attnroute but aren't part of the package
 POOL_SCRIPTS = ["pool-auto-update.py", "pool-loader.py", "pool-extractor.py"]
@@ -418,11 +490,19 @@ def generate_keywords_template(project_path: Path) -> dict:
     return template
 
 
-def main():
-    """Main installer entry point."""
+def main(target: str = "auto", project_local: bool = False):
+    """Main installer entry point.
+
+    Args:
+        target: Which runtime(s) to install hooks for: "auto" (detect installed
+            runtimes, installing for Claude Code, Antigravity, or both),
+            "claude", "agy", or "all".
+        project_local: For Antigravity, write to `.agents/hooks.json` in the
+            current directory instead of `~/.gemini/config/hooks.json`.
+    """
     print()
     print(f"  attnroute v{VERSION}")
-    print("  Attentional context routing for Claude Code")
+    print("  Context routing & session hooks for Claude Code and Antigravity")
     print("─" * 56)
     print()
 
@@ -430,11 +510,26 @@ def main():
     platform = sys.platform
     python_cmd = detect_python_command()
     use_entry_points = detect_entry_points()
+    runtimes = detect_runtimes()
+
+    if target == "claude":
+        install_claude, install_agy = True, False
+    elif target == "agy":
+        install_claude, install_agy = False, True
+    elif target == "all":
+        install_claude, install_agy = True, True
+    else:  # "auto"
+        install_claude = runtimes["claude"] or not runtimes["agy"]
+        install_agy = runtimes["agy"]
 
     mode = "pip entry points" if use_entry_points else f"script paths ({python_cmd})"
+    active_targets = [
+        name for name, on in (("Claude Code", install_claude), ("Antigravity", install_agy)) if on
+    ]
     print(f"  Platform   {platform}")
     print(f"  Python     {python_cmd}")
     print(f"  Mode       {mode}")
+    print(f"  Targets    {', '.join(active_targets)}")
     print()
 
     # Check dependencies
@@ -450,55 +545,62 @@ def main():
 
     if installed < total:
         print("\n  To install all dependencies:")
-        print("    pip install bm25s model2vec numpy tree-sitter-languages")
+        print("    pip install attnroute[all]")
     print()
 
     # Ensure telemetry directory
     TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
     print(f"  Telemetry dir: {TELEMETRY_DIR}")
 
-    # Check for existing settings
-    existing = {}
-    if SETTINGS_FILE.exists():
-        try:
-            existing = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            # Create backup before modifying
-            backup_file = SETTINGS_FILE.with_suffix(".json.bak")
-            backup_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-            print(f"  Backup: {backup_file}")
-        except Exception:
-            pass
+    if install_claude:
+        # Check for existing settings
+        existing = {}
+        if SETTINGS_FILE.exists():
+            try:
+                existing = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+                # Create backup before modifying
+                backup_file = SETTINGS_FILE.with_suffix(".json.bak")
+                backup_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+                print(f"  Backup: {backup_file}")
+            except Exception:
+                pass
 
-    # Check for pool scripts
-    has_pool = any((SCRIPTS_DIR / p).exists() for p in POOL_SCRIPTS)
+        # Check for pool scripts
+        has_pool = any((SCRIPTS_DIR / p).exists() for p in POOL_SCRIPTS)
 
-    # Build new settings
-    new_settings = build_settings(python_cmd, use_entry_points, include_pool=has_pool)
+        # Build new settings
+        new_settings = build_settings(python_cmd, use_entry_points, include_pool=has_pool)
 
-    # Merge hooks with existing hooks (preserves user's other hooks)
-    existing_hooks = existing.get("hooks", {})
-    new_hooks = new_settings.get("hooks", {})
-    new_settings["hooks"] = merge_hooks(existing_hooks, new_hooks)
+        # Merge hooks with existing hooks (preserves user's other hooks)
+        existing_hooks = existing.get("hooks", {})
+        new_hooks = new_settings.get("hooks", {})
+        new_settings["hooks"] = merge_hooks(existing_hooks, new_hooks)
 
-    # Merge with existing non-hook settings
-    for key, value in existing.items():
-        if key != "hooks":
-            new_settings[key] = value
+        # Merge with existing non-hook settings
+        for key, value in existing.items():
+            if key != "hooks":
+                new_settings[key] = value
 
-    # Write settings
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps(new_settings, indent=2), encoding="utf-8")
-    print(f"  Settings: {SETTINGS_FILE} (updated)")
+        # Write settings
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.write_text(json.dumps(new_settings, indent=2), encoding="utf-8")
+        print(f"  Claude Code settings: {SETTINGS_FILE} (updated)")
 
-    # Show hook summary
-    hook_count = sum(
-        len(group["hooks"])
-        for event_hooks in new_settings["hooks"].values()
-        for group in event_hooks
-    )
-    print(f"  Hooks installed: {hook_count} across {len(new_settings['hooks'])} events")
-    if has_pool:
-        print(f"  Pool scripts: included (found in {SCRIPTS_DIR})")
+        # Show hook summary
+        hook_count = sum(
+            len(group["hooks"])
+            for event_hooks in new_settings["hooks"].values()
+            for group in event_hooks
+        )
+        print(f"  Claude Code hooks: {hook_count} across {len(new_settings['hooks'])} events")
+        if has_pool:
+            print(f"  Pool scripts: included (found in {SCRIPTS_DIR})")
+
+    if install_agy:
+        agy_exe = f'"{Path(sys.executable).as_posix()}"' if sys.executable else python_cmd
+        agy_target = (Path.cwd() / ".agents" / "hooks.json") if project_local else AGY_HOOKS_FILE
+        written = install_agy_hooks(agy_exe, hooks_file=agy_target)
+        print(f"  Antigravity hooks: {written} (updated — 5 lifecycle events)")
 
     # Try to build search index if deps available
     maybe_build_search_index()
@@ -540,7 +642,7 @@ def main():
     print()
     print("─" * 56)
     print("  Ready. Source code routing is active.")
-    print("  Hooks activate on next Claude Code session.")
+    print(f"  Hooks activate on next session ({', '.join(active_targets)}).")
 
     # Hint about tree-sitter for faster indexing
     if not deps.get("tree_sitter_languages", {}).get("installed", False):

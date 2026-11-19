@@ -21,9 +21,11 @@ from pathlib import Path
 
 
 def cmd_init(args):
-    """Initialize attnroute for current project."""
+    """Initialize attnroute for Claude Code and/or Antigravity."""
     from attnroute.installer import main as installer_main
-    installer_main()
+    target = getattr(args, "target", "auto")
+    project_local = bool(getattr(args, "project_local", False))
+    installer_main(target=target, project_local=project_local)
 
 
 def cmd_status(args):
@@ -924,9 +926,23 @@ For more information, visit: https://github.com/jeranaias/attnroute
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # init command
-    init_parser = subparsers.add_parser("init", help="Initialize attnroute for current project")
+    init_parser = subparsers.add_parser(
+        "init", help="Initialize attnroute hooks (auto-detects Claude Code and Antigravity)"
+    )
     init_parser.add_argument("--global", dest="global_install", action="store_true",
                              help="Install globally instead of project-local")
+    init_parser.add_argument(
+        "--target",
+        choices=["auto", "claude", "agy", "all"],
+        default="auto",
+        help="Runtime to configure: auto (default), claude, agy, or all",
+    )
+    init_parser.add_argument(
+        "--project-local",
+        dest="project_local",
+        action="store_true",
+        help="Write Antigravity hooks to ./.agents/hooks.json instead of ~/.gemini/config/hooks.json",
+    )
 
     # status command
     subparsers.add_parser("status", help="Show current status and configuration")

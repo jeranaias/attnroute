@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-19
+
+### Added
+- **Native Antigravity (`agy`) Hook Support (`attnroute.agy_hook`)**: Full lifecycle adapter translating Antigravity's camelCase `hooks.json` contract (`SessionStart`, `PreInvocation`, `PreToolUse`, `PostToolUse`, `Stop`) into `attnroute`'s core engines:
+  - Per-turn deduplicated context routing via `PreInvocation` → `injectSteps` (works with or without a `.claude/` directory).
+  - Pinned ruling handback via `SessionStart` (`attnroute note`).
+  - Same-window read deduplication & edit invalidation via `read_ledger` on `read_file`/`view_file` and `edit_file`/`write_file`/`replace_file_content`.
+  - Cross-platform Bash/PowerShell output capping on `run_command` via `overwrite.CommandLine` (strictly returning `"decision": "ask"` so permission prompts are never bypassed).
+  - Zero-egress lockdown and fail-open error handling.
+- **Dual-Runtime Auto-Detecting Installer (`attnroute init --target auto|claude|agy|all`)**: `attnroute init` now auto-detects both Claude Code (`~/.claude/settings.json`) and Antigravity (`~/.gemini/config/hooks.json` or `./.agents/hooks.json` via `--project-local`), backing up and non-destructively merging existing hook configs.
+
 ## [1.1.0] - 2026-11-19
 
 ### Added
