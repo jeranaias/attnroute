@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-19
+
+### Security & Hardening (#41)
+- **Predictor Serialization & Corpus Scoping**: Hardened predictor persistence, enforced path-boundary matching for project-scoped `keywords.json` corpora (preventing sibling directory prefix bleed), added remote-name allowlist validation in `attnroute.board`, and expanded `no_egress` loopback checks to full RFC 1122/4291 (`127.0.0.0/8`, `::1`).
+- **Atomic Writes & Concurrency**: Routed direct JSON state/config writes through `safe_atomic_write()` across `warmup`, `advisor`, `freshness`, `installer`, `agy_hook`, and `integrations`; locked plugin config read-modify-write cycles; used unique temp files (`tempfile.mkstemp`) for `levers.json`.
+- **Hook Resilience & Performance**: Guarded missing `networkx`/empty `.git`/corrupt JSON/empty state edges, honored `--tokens` in `graph_retriever` and positive `--last` in `history`, eliminated double SQLite lookup in `ProgressiveRetriever.layer3_full()`, and collapsed 10 unpruned `rglob()` walks in `StalenessChecker` into a single pruned `os.walk()`. Added 19 regression tests in `tests/test_audit_remediation.py`.
+
 ## [1.2.1] - 2026-11-19
 
 ### Fixed

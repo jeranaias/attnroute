@@ -539,7 +539,7 @@ attnroute status
 # Output:
 # attnroute Status
 # ══════════════════════════════════════════════════════════════
-# Version: 1.2.1
+# Version: 1.2.2
 # Features:
 #   ✓ BM25 search
 #   ✓ Semantic search
