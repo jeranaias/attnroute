@@ -522,10 +522,16 @@ def run_bulletproof_benchmark(use_public_repos: bool = False,
             reduction_ci = calculate_ci(reductions)
             time_ci = calculate_ci(times)
 
+            baseline_primary = attn_stats['baseline_tokens'].get(
+                'tiktoken_cl100k', attn_stats['baseline_tokens'].get('anthropic_estimate', 0)
+            )
+            output_primary = attn_stats['output_tokens'].get(
+                'tiktoken_cl100k', attn_stats['output_tokens'].get('anthropic_estimate', 0)
+            )
             print()
             print(f"  Results ({NUM_RUNS} runs):")
-            print(f"    Baseline tokens:     {attn_stats['baseline_tokens']['tiktoken_cl100k']:,}")
-            print(f"    Output tokens:       {attn_stats['output_tokens']['tiktoken_cl100k']:,}")
+            print(f"    Baseline tokens:     {baseline_primary:,}")
+            print(f"    Output tokens:       {output_primary:,}")
             print(f"    Reduction:           {attn_stats['reduction_mean']:.2f}% ± {attn_stats['reduction_std']:.2f}%")
             print(f"    95% CI:              [{reduction_ci[0]:.2f}%, {reduction_ci[1]:.2f}%]")
             print(f"    Time:                {attn_stats['time_mean']:.1f}ms ± {attn_stats['time_std']:.1f}ms")
@@ -533,8 +539,8 @@ def run_bulletproof_benchmark(use_public_repos: bool = False,
 
             results.append({
                 'repo': repo_name,
-                'baseline': attn_stats['baseline_tokens']['tiktoken_cl100k'],
-                'output': attn_stats['output_tokens']['tiktoken_cl100k'],
+                'baseline': baseline_primary,
+                'output': output_primary,
                 'reduction_mean': attn_stats['reduction_mean'],
                 'reduction_std': attn_stats['reduction_std'],
                 'reduction_ci': reduction_ci,

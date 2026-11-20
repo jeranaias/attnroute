@@ -663,9 +663,18 @@ def load_keyword_config() -> tuple[dict[str, list[str]], dict[str, list[str]], l
                 #   reaching an unrelated repository. A config that declares nothing behaves as
                 #   before, so this does not break an existing single-project setup.
                 if declared is not None:
-                    here = str(Path.cwd()).lower().replace("\\", "/")
-                    if not any(str(d).lower().replace("\\", "/") in here
-                               for d in declared if d):
+                    here = str(Path.cwd()).lower().replace("\\", "/").rstrip("/")
+                    here_parts = [part for part in here.split("/") if part]
+
+                    def _matches_declared(entry: object) -> bool:
+                        d_norm = str(entry).lower().replace("\\", "/").rstrip("/")
+                        if not d_norm:
+                            return False
+                        if "/" in d_norm:
+                            return here == d_norm or here.startswith(d_norm + "/")
+                        return d_norm in here_parts
+
+                    if not any(_matches_declared(d) for d in declared if d):
                         print(f"[attnroute] {config_path} declares projects {declared} and this "
                               f"is not one of them -- NOT applying it here",
                               file=sys.stderr)
@@ -1830,7 +1839,7 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
     """
     # Sort files by attention score (highest first) for tier assignment
     sorted_files = sorted(
-        state["scores"].items(),
+        (state.get("scores") or {}).items(),
         key=lambda x: x[1],
         reverse=True
     )
@@ -2019,7 +2028,7 @@ def build_context_output(state: dict, docs_root: Path) -> tuple[str, dict]:
     output_parts = []
 
     # Status header
-    turn_label = f"Turn {state['turn_count']}"
+    turn_label = f"Turn {state.get('turn_count', 0)}"
     tier_line = f"Hot: {stats['hot']}  Warm: {stats['warm']}  Cold: {stats['cold']}"
     hint_info = f"  Hint: {stats['hint']}" if stats.get('hint') else ""
     src_line = f"Src: {stats['hot_src']}H/{stats['warm_src']}W{hint_info}" if (stats['hot_src'] + stats['warm_src'] + stats.get('hint', 0)) > 0 else ""

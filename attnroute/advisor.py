@@ -94,10 +94,10 @@ class ClaudeMdAdvisor:
                 state = {}
 
             state["suggestions"] = self.suggestions
-            LEARNED_STATE_FILE.write_text(
-                json.dumps(state, indent=2, default=str),
-                encoding="utf-8"
-            )
+            from attnroute.compat import safe_atomic_write
+            payload = json.dumps(state, indent=2, default=str)
+            if not safe_atomic_write(LEARNED_STATE_FILE, payload):
+                LEARNED_STATE_FILE.write_text(payload, encoding="utf-8")
         except Exception:
             pass
 
@@ -318,7 +318,10 @@ class ClaudeMdAdvisor:
                 data["demoted_files"] = demoted
 
                 overrides_file.parent.mkdir(parents=True, exist_ok=True)
-                overrides_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                from attnroute.compat import safe_atomic_write
+                payload = json.dumps(data, indent=2)
+                if not safe_atomic_write(overrides_file, payload):
+                    overrides_file.write_text(payload, encoding="utf-8")
 
             suggestion["status"] = "applied"
             suggestion["applied_at"] = datetime.now().isoformat()

@@ -681,7 +681,7 @@ class ProgressiveRetriever:
 
     def layer3_full(self, obs_ids: list[str]) -> list[CompressedObservation]:
         """Layer 3: Get full observation details."""
-        return [self.db.get(oid) for oid in obs_ids if self.db.get(oid)]
+        return [obs for oid in obs_ids if (obs := self.db.get(oid)) is not None]
 
     def get_session_summary(self, session_id: str) -> str:
         """Get formatted summary for a session."""

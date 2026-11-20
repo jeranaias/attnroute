@@ -250,6 +250,8 @@ Examples:
     parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
 
     args = parser.parse_args()
+    if args.last <= 0:
+        parser.error("--last must be a positive integer")
 
     since = parse_duration(args.since) if args.since else None
     entries = load_history(

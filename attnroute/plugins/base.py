@@ -27,12 +27,14 @@ class AttnroutePlugin(ABC):
     version: str = "0.1.0"
     description: str = "Base plugin"
 
-    # State management
-    _state_dir = Path.home() / ".claude" / "plugins"
+    # State management (resolved lazily in __init__ unless overridden by a subclass/test)
+    _state_dir: Path | None = None
 
     def __init__(self):
         # Validate plugin name to prevent path traversal attacks
         validate_plugin_name(self.name)
+        if self._state_dir is None:
+            self._state_dir = Path.home() / ".claude" / "plugins"
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._state_file = self._state_dir / f"{self.name}_state.json"
         self._enabled_cache: bool | None = None

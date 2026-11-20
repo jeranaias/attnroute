@@ -127,8 +127,23 @@ def _set_plugin_enabled(name: str, enabled: bool) -> bool:
         from attnroute.compat import safe_atomic_write, validate_plugin_name
         validate_plugin_name(name)
     except ImportError:
-        # Fallback: basic validation
-        if '/' in name or '\\' in name or '..' in name:
+        # Fallback: block path traversal, null bytes, ADS colons, and Windows device names
+        reserved = {
+            "CON", "PRN", "AUX", "NUL",
+            *(f"COM{i}" for i in range(1, 10)),
+            *(f"LPT{i}" for i in range(1, 10)),
+        }
+        stem = name.split(".", 1)[0].upper() if isinstance(name, str) else ""
+        if (
+            not isinstance(name, str)
+            or not name
+            or "/" in name
+            or "\\" in name
+            or ".." in name
+            or "\x00" in name
+            or ":" in name
+            or stem in reserved
+        ):
             print(f"[attnroute] Invalid plugin name: {name}", file=sys.stderr)
             return False
         safe_atomic_write = None
@@ -137,34 +152,35 @@ def _set_plugin_enabled(name: str, enabled: bool) -> bool:
         return False
 
     config_file = Path.home() / ".claude" / "plugins" / "config.json"
-    config_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # TOCTOU-safe: use try/except instead of exists()
-    try:
-        config = json.loads(config_file.read_text(encoding="utf-8"))
-        # Type validation: ensure we get a dict
-        if not isinstance(config, dict):
-            print("[attnroute] Config is not a dict, using defaults", file=sys.stderr)
-            config = {}
-    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
-        if not isinstance(e, FileNotFoundError):
-            print(f"[attnroute] Config parse failed, using defaults: {e}", file=sys.stderr)
-        config = {}
-
-    if "enabled" not in config:
-        config["enabled"] = {}
-
-    config["enabled"][name] = enabled
-
-    # Use atomic write if available
-    content = json.dumps(config, indent=2)
-    if safe_atomic_write:
-        safe_atomic_write(config_file, content)
-    else:
-        config_file.write_text(content, encoding="utf-8")
-
-    # Re-discover to apply changes
     with _lock:
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # TOCTOU-safe: use try/except instead of exists()
+        try:
+            config = json.loads(config_file.read_text(encoding="utf-8"))
+            # Type validation: ensure we get a dict
+            if not isinstance(config, dict):
+                print("[attnroute] Config is not a dict, using defaults", file=sys.stderr)
+                config = {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+            if not isinstance(e, FileNotFoundError):
+                print(f"[attnroute] Config parse failed, using defaults: {e}", file=sys.stderr)
+            config = {}
+
+        if "enabled" not in config or not isinstance(config["enabled"], dict):
+            config["enabled"] = {}
+
+        config["enabled"][name] = enabled
+
+        # Use atomic write if available
+        content = json.dumps(config, indent=2)
+        if safe_atomic_write:
+            safe_atomic_write(config_file, content)
+        else:
+            config_file.write_text(content, encoding="utf-8")
+
+        # Re-discover to apply changes
         _discovered = False
         _plugins = {}
         _discover_plugins_unlocked()

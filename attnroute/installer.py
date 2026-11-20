@@ -182,7 +182,10 @@ def install_agy_hooks(python_cmd: str, hooks_file: Path | None = None) -> Path:
             pass
     merged = merge_agy_hooks(existing, build_agy_hooks(python_cmd))
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    from attnroute.compat import safe_atomic_write
+    payload = json.dumps(merged, indent=2) + "\n"
+    if not safe_atomic_write(target, payload):
+        target.write_text(payload, encoding="utf-8")
     return target
 
 # Pool scripts that live alongside attnroute but aren't part of the package
@@ -581,9 +584,12 @@ def main(target: str = "auto", project_local: bool = False):
             if key != "hooks":
                 new_settings[key] = value
 
-        # Write settings
+        # Write settings atomically
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_FILE.write_text(json.dumps(new_settings, indent=2), encoding="utf-8")
+        from attnroute.compat import safe_atomic_write
+        settings_payload = json.dumps(new_settings, indent=2)
+        if not safe_atomic_write(SETTINGS_FILE, settings_payload):
+            SETTINGS_FILE.write_text(settings_payload, encoding="utf-8")
         print(f"  Claude Code settings: {SETTINGS_FILE} (updated)")
 
         # Show hook summary

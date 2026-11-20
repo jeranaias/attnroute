@@ -304,7 +304,8 @@ def repo_namespace_id(repo_path: str | Path) -> str:
                 if git_marker.is_file():
                     anchor = cur
                     try:
-                        first_line = git_marker.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+                        lines = git_marker.read_text(encoding="utf-8", errors="replace").splitlines()
+                        first_line = lines[0] if lines else ""
                         if first_line.lower().startswith("gitdir:"):
                             gitdir = Path(first_line.split(":", 1)[1].strip())
                             if not gitdir.is_absolute():

@@ -787,9 +787,11 @@ def apply_warmup_to_state(project_dir: str | Path, attn_state_path: Path = None)
             attn.setdefault("scores", {})[path] = warmup_score
             applied += 1
 
-    # Save
+    # Save atomically
     attn_state_path.parent.mkdir(parents=True, exist_ok=True)
-    attn_state_path.write_text(json.dumps(attn, indent=2), encoding="utf-8")
+    from attnroute.compat import safe_atomic_write
+    if not safe_atomic_write(attn_state_path, json.dumps(attn, indent=2)):
+        attn_state_path.write_text(json.dumps(attn, indent=2), encoding="utf-8")
 
     hot = sum(1 for s in attn["scores"].values() if s >= HOT_THRESHOLD)
     warm = sum(1 for s in attn["scores"].values() if WARM_THRESHOLD <= s < HOT_THRESHOLD)

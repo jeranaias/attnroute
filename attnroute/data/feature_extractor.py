@@ -56,6 +56,8 @@ def extract_features(file_path: str) -> list[float]:
         List of 12 floats representing the file's features
     """
     features = [0.0] * FEATURE_DIM
+    if not isinstance(file_path, str) or not file_path:
+        return features
     path = Path(file_path.replace("\\", "/"))
     name = path.name.lower()
     stem = path.stem.lower()

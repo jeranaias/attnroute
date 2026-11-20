@@ -303,11 +303,18 @@ class ContinuousClaudeAdapter:
 
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
-        filepath.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        from attnroute.compat import safe_atomic_write
+        if not safe_atomic_write(filepath, json.dumps(data, indent=2)):
+            filepath.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def load_ledger(self, filepath: Path) -> list[LedgerEntry]:
         """Load ledger entries from JSON file."""
-        data = json.loads(Path(filepath).read_text(encoding="utf-8"))
+        try:
+            data = json.loads(Path(filepath).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, dict):
+            return []
 
         return [
             LedgerEntry(
@@ -317,6 +324,7 @@ class ContinuousClaudeAdapter:
                 metadata=e.get("metadata", {}),
             )
             for e in data.get("entries", [])
+            if isinstance(e, dict)
         ]
 
     def create_handoff(self, session_summary: str, key_decisions: list[str],
@@ -480,13 +488,17 @@ def _merge_max(state1: dict, state2: dict) -> dict:
         merged_key = dict(s1)
         for k, v in s2.items():
             if isinstance(v, dict):
-                if k not in merged_key:
+                if not isinstance(merged_key.get(k), dict):
                     merged_key[k] = {}
+                else:
+                    merged_key[k] = dict(merged_key[k])
                 for inner_k, inner_v in v.items():
                     existing = merged_key[k].get(inner_k, 0)
                     merged_key[k][inner_k] = max(existing, inner_v)
             else:
                 existing = merged_key.get(k, 0)
+                if isinstance(existing, dict):
+                    existing = 0
                 merged_key[k] = max(existing, v)
 
         merged[key] = merged_key
@@ -505,13 +517,17 @@ def _merge_avg(state1: dict, state2: dict) -> dict:
         merged_key = dict(s1)
         for k, v in s2.items():
             if isinstance(v, dict):
-                if k not in merged_key:
+                if not isinstance(merged_key.get(k), dict):
                     merged_key[k] = {}
+                else:
+                    merged_key[k] = dict(merged_key[k])
                 for inner_k, inner_v in v.items():
                     existing = merged_key[k].get(inner_k, 0)
                     merged_key[k][inner_k] = (existing + inner_v) / 2
             else:
                 existing = merged_key.get(k, 0)
+                if isinstance(existing, dict):
+                    existing = 0
                 merged_key[k] = (existing + v) / 2
 
         merged[key] = merged_key

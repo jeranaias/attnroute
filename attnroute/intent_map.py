@@ -76,6 +76,8 @@ def boost_by_intent(
     """
     if not strategies:
         return scores
+    if not isinstance(state, dict):
+        state = {}
 
     for strategy in strategies:
         if strategy == "test_files":
