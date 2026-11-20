@@ -76,9 +76,20 @@ def _address_of(address) -> tuple[str, object]:
     return str(address), None
 
 
+def _is_local_host(host: str) -> bool:
+    """Return True for localhost names and any RFC 1122/4291 loopback address."""
+    if host in LOCAL_HOSTS:
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _guarded_connect(self, address):
     host, port = _address_of(address)
-    if host in LOCAL_HOSTS:
+    if _is_local_host(host):
         return _ORIGINAL_CONNECT(self, address)
     REFUSED.append(f"{host}:{port}")
     raise EgressRefused(

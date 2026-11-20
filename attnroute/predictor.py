@@ -22,7 +22,6 @@ by confidence and only top-k are injected.
 """
 
 import json
-import pickle
 import re
 import sys
 from collections import Counter, defaultdict
@@ -30,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
-MODEL_CACHE_FILE = Path.home() / ".claude" / "telemetry" / "predictor_model.pkl"
+MODEL_CACHE_FILE = Path.home() / ".claude" / "telemetry" / "predictor_model.json"
 
 
 @dataclass
@@ -43,6 +42,48 @@ class PredictorModelV5:
     file_popularity: Counter = field(default_factory=Counter)
     # NEW: Project popularity (which files are most used in each project)
     project_popularity: dict[str, list[str]] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "version": 5,
+            "co_occurrence": {k: dict(v) for k, v in self.co_occurrence.items()},
+            "project_files": {k: dict(v) for k, v in self.project_files.items()},
+            "name_to_paths": {k: sorted(v) for k, v in self.name_to_paths.items()},
+            "sequences": [[list(seq), dict(cnt)] for seq, cnt in self.sequences.items()],
+            "strong_keywords": dict(self.strong_keywords),
+            "file_popularity": dict(self.file_popularity),
+            "project_popularity": {k: list(v) for k, v in self.project_popularity.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PredictorModelV5":
+        if not isinstance(data, dict):
+            raise ValueError("PredictorModelV5 cache must be a JSON object")
+        model = cls()
+        for k, v in (data.get("co_occurrence") or {}).items():
+            if isinstance(k, str) and isinstance(v, dict):
+                model.co_occurrence[k] = Counter(v)
+        for k, v in (data.get("project_files") or {}).items():
+            if isinstance(k, str) and isinstance(v, dict):
+                model.project_files[k] = Counter(v)
+        for k, v in (data.get("name_to_paths") or {}).items():
+            if isinstance(k, str) and isinstance(v, list):
+                model.name_to_paths[k] = {str(p) for p in v}
+        for item in data.get("sequences") or []:
+            if isinstance(item, list) and len(item) == 2 and isinstance(item[0], list) and isinstance(item[1], dict):
+                model.sequences[tuple(str(x) for x in item[0])] = Counter(item[1])
+        sk = data.get("strong_keywords") or {}
+        if isinstance(sk, dict):
+            model.strong_keywords = {str(k): str(v) for k, v in sk.items()}
+        fp = data.get("file_popularity") or {}
+        if isinstance(fp, dict):
+            model.file_popularity = Counter(fp)
+        pp = data.get("project_popularity") or {}
+        if isinstance(pp, dict):
+            model.project_popularity = {
+                str(k): [str(x) for x in v] for k, v in pp.items() if isinstance(v, list)
+            }
+        return model
 
 
 def normalize_path(path: str) -> str:
@@ -96,6 +137,9 @@ def train_model_v5(max_sessions: int = 200) -> PredictorModelV5:
     keyword_file_counts: dict[str, Counter] = defaultdict(Counter)
     sessions_processed = 0
     total_turns = 0
+
+    if not PROJECTS_DIR.is_dir():
+        return model
 
     for project_dir in PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
@@ -478,22 +522,24 @@ def benchmark_predictor_v5(model: PredictorModelV5, max_turns: int = 1500):
 
 
 def save_model(model: PredictorModelV5, path: Path = MODEL_CACHE_FILE):
-    """Save trained model to disk."""
+    """Save trained model to disk as safe atomic JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with open(path, 'wb') as f:
-            pickle.dump(model, f)
+        payload = json.dumps(model.to_dict(), separators=(",", ":"))
+        from attnroute.compat import safe_atomic_write
+        if not safe_atomic_write(path, payload):
+            raise OSError(f"atomic write failed for {path}")
     except Exception as e:
         print(f"Failed to save predictor model: {e}", file=sys.stderr)
 
 
 def load_model(path: Path = MODEL_CACHE_FILE) -> PredictorModelV5 | None:
-    """Load trained model from disk."""
+    """Load trained model from safe JSON cache on disk."""
     if not path.exists():
         return None
     try:
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return PredictorModelV5.from_dict(data)
     except Exception as e:
         print(f"Failed to load predictor model: {e}", file=sys.stderr)
         return None

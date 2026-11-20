@@ -73,13 +73,13 @@ def run_aider_repomap(repo_path: str, max_tokens: int = 4096):
     print("=" * 70)
     print()
 
+    original_dir = os.getcwd()
     try:
         from aider.io import InputOutput
         from aider.models import Model
         from aider.repomap import RepoMap
 
         # Change to repo directory
-        original_dir = os.getcwd()
         os.chdir(repo_path)
 
         print(f"Repository: {repo_path}")

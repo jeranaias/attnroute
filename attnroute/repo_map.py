@@ -184,7 +184,8 @@ class RepoMapper:
         self.repo_path = Path(repo_path)
         self.max_files = max_files
         self.file_symbols: dict[str, FileSymbols] = {}
-        self.dependency_graph = _nx().DiGraph() if NETWORKX_AVAILABLE else None
+        _nx_mod = _nx() if NETWORKX_AVAILABLE else None
+        self.dependency_graph = _nx_mod.DiGraph() if _nx_mod is not None else None
         # Directed structural adjacency: caller/importer -> callee/imported (works without networkx)
         self.structural_edges: dict[str, set[str]] = {}
         self.reverse_structural_edges: dict[str, set[str]] = {}

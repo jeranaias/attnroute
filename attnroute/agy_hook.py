@@ -141,7 +141,10 @@ def _already_routed_prompt(sid: str, prompt: str) -> bool:
         pass
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"digest": digest, "at": time.time()}), encoding="utf-8")
+        from attnroute.compat import safe_atomic_write
+        payload = json.dumps({"digest": digest, "at": time.time()})
+        if not safe_atomic_write(path, payload):
+            path.write_text(payload, encoding="utf-8")
     except OSError:
         pass
     return False

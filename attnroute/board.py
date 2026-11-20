@@ -23,6 +23,7 @@ Nothing here writes to the working tree, and nothing on the read path opens a so
 """
 
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -180,6 +181,15 @@ def _build_commit(repo: Path, path: str, text: str, parent: str | None, message:
     return _git([*args, "-m", message], repo).strip()
 
 
+_REMOTE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _validate_remote(remote: str) -> str:
+    if not isinstance(remote, str) or not remote or remote.startswith("-") or ".." in remote or not _REMOTE_RE.fullmatch(remote):
+        raise BoardError(f"invalid git remote name: {remote!r}")
+    return remote
+
+
 def write(team: str, text: str, repo: Path | str = ".", remote: str = "origin",
           message: str | None = None) -> dict:
     """Publish one writer's row. -> {"commit", "path", "attempts", "created_branch"}
@@ -192,6 +202,7 @@ def write(team: str, text: str, repo: Path | str = ".", remote: str = "origin",
     with somebody else's file -- which carrying only ours cannot lose.
     """
     repo = Path(repo)
+    remote = _validate_remote(remote)
     path = team_file(team)
     if not text.endswith("\n"):
         text += "\n"

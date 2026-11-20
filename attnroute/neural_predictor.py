@@ -91,6 +91,9 @@ def extract_training_data(max_sessions: int = 200) -> list[dict]:
     """
     sessions = []
 
+    if not PROJECTS_DIR.is_dir():
+        return sessions
+
     for project_dir in PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
             continue
@@ -701,6 +704,8 @@ class NeuralPredictor:
             probs = torch.sigmoid(logits).squeeze(0)
 
         # Get top-k predictions
+        if len(probs) == 0 or top_k <= 0:
+            return []
         top_vals, top_idxs = torch.topk(probs, k=min(top_k, len(probs)))
 
         results = []

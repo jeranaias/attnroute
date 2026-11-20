@@ -140,9 +140,18 @@ def set_lever(name: str, on: bool) -> dict:
 
     data[name] = bool(on)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    # Temp-and-replace: a hook event reading this file while it is written must see the old
-    # contents or the new ones, never a half-written object. `open(path, "w")` truncates first.
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # Unique temp-and-replace: concurrent writers never share a temp filename,
+    # and a hook event reading this file sees either the old or the new object.
+    import tempfile
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.stem + "_", suffix=".json.tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return {"path": path, "lost": lost}

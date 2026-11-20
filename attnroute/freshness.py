@@ -82,29 +82,33 @@ class StalenessChecker:
             return {}
 
     def _save_cache(self):
-        """Save freshness cache."""
+        """Save freshness cache atomically."""
         ensure_telemetry_dir()
         try:
-            FRESHNESS_CACHE.write_text(
-                json.dumps(self.cache, indent=2),
-                encoding="utf-8"
-            )
+            from attnroute.compat import safe_atomic_write
+            payload = json.dumps(self.cache, indent=2)
+            if not safe_atomic_write(FRESHNESS_CACHE, payload):
+                FRESHNESS_CACHE.write_text(payload, encoding="utf-8")
         except Exception:
             pass
 
     def _build_file_index(self) -> set[str]:
-        """Build index of all files in codebase."""
+        """Build index of all files in codebase in a single pruned walk."""
         if self._files is not None:
             return self._files
 
         self._files = set()
+        exts = {".py", ".js", ".ts", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h"}
+        skip_dirs = {"node_modules", ".git", "__pycache__", ".venv", "venv"}
         try:
-            # Index common source files
-            for ext in ["*.py", "*.js", "*.ts", "*.tsx", "*.go", "*.rs", "*.java", "*.c", "*.cpp", "*.h"]:
-                for f in self.codebase_root.rglob(ext):
-                    if "node_modules" in str(f) or ".git" in str(f):
+            import os
+            for dirpath, dirnames, filenames in os.walk(self.codebase_root):
+                dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+                base = Path(dirpath)
+                for fname in filenames:
+                    f = base / fname
+                    if f.suffix not in exts:
                         continue
-                    # Add filename and relative path
                     self._files.add(f.name)
                     try:
                         self._files.add(str(f.relative_to(self.codebase_root)))

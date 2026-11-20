@@ -162,8 +162,8 @@ def main():
             print("Error: query required for rank command", file=sys.stderr)
             sys.exit(1)
         mapper = RepoMapper(args.path)
-        # Get ranked files (top 10)
-        context = mapper.get_map(query=args.query, token_budget=500)
+        # Get ranked files honoring --tokens
+        context = mapper.get_map(query=args.query, token_budget=args.tokens)
         print("\nTop ranked files for query:", args.query)
         print("=" * 50)
         print(context)
