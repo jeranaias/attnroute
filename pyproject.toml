@@ -1,6 +1,6 @@
 [project]
 name = "attnroute"
-version = "1.2.0"
+version = "1.2.1"
 description = "Context routing, session handback, and cost measurement for Claude Code and Antigravity"
 readme = "README.md"
 license = {text = "MIT"}

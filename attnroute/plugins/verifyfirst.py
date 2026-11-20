@@ -391,14 +391,18 @@ class VerifyFirstPlugin(AttnroutePlugin):
         """Extract file paths and module references from user prompt text."""
         refs = []
 
-        # Match explicit file paths (with extensions)
-        path_pattern = r'(?:[\w./\\-]+/)?[\w.-]+\.(?:py|js|ts|tsx|jsx|rs|go|java|rb|cpp|c|h|hpp|css|html|md|json|yaml|yml|toml|sql|txt|sh|bat|cfg|ini|xml|env|lock|conf|vue|svelte|swift|kt|scala|zig|ex|exs|erl|lua|r|jl|dart|proto|graphql|prisma|tf|hcl)'
-        for match in re.finditer(path_pattern, prompt):
+        # Strip URLs first so domains like https://www.linkedin.com/in/foo
+        # never match `.c` as `//www.linkedin.c`.
+        cleaned = re.sub(r'(?:https?|file)://\S+', ' ', prompt)
+
+        # Match explicit file paths (with extensions, bounded so `.c` does not match `.com`)
+        path_pattern = r'(?:[\w./\\-]+/)?[\w.-]+\.(?:py|js|ts|tsx|jsx|rs|go|java|rb|cpp|c|h|hpp|css|html|md|json|yaml|yml|toml|sql|txt|sh|bat|cfg|ini|xml|env|lock|conf|vue|svelte|swift|kt|scala|zig|ex|exs|erl|lua|r|jl|dart|proto|graphql|prisma|tf|hcl)(?![A-Za-z0-9_])'
+        for match in re.finditer(path_pattern, cleaned):
             refs.append(match.group())
 
         # Match Windows-style paths
         win_pattern = r'[A-Za-z]:\\(?:[\w.-]+\\)*[\w.-]+\.\w+'
-        for match in re.finditer(win_pattern, prompt):
+        for match in re.finditer(win_pattern, cleaned):
             refs.append(match.group())
 
         return list(set(refs))

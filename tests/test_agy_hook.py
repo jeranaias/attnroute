@@ -232,6 +232,30 @@ class TestAgySessionAndPreInvocation:
         assert "injectSteps" in res3
         assert calls["n"] == 2
 
+    def test_pre_invocation_stays_silent_on_zero_hit_chat_turns(
+        self, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from attnroute import context_router as cr
+
+        monkeypatch.setattr(cr, "observe_only", lambda: False)
+        monkeypatch.setattr(cr, "update_attention", lambda st, p: (st, []))
+        monkeypatch.setattr(
+            cr,
+            "build_context_output",
+            lambda st, root: ("Hot: 0 Warm: 0 Cold: 0", {"hot": 0, "warm": 0, "cold": 0}),
+        )
+        monkeypatch.setattr(cr, "append_history", lambda *a, **k: None)
+        monkeypatch.setattr(cr, "save_state", lambda *a, **k: None)
+
+        res = agy_hook.handle({
+            "hookEventName": "PreInvocation",
+            "conversationId": "conv-chat-only",
+            "cwd": str(isolated_home),
+            "lastUserInput": "Help me reply to a LinkedIn comment",
+            "invocationNum": 1,
+        })
+        assert res == {}
+
     def test_stop_never_traps_in_continuation_loop(self, isolated_home: Path):
         res = agy_hook.handle({
             "hookEventName": "Stop",

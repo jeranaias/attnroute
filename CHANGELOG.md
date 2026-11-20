@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-19
+
+### Fixed
+- **Antigravity `PreInvocation` noise (`attnroute.agy_hook`)**: Skipped Claude-Code-only plugins (`BurnRate`, `VerifyFirst`, `LoopBreaker`, `ContextGuard`) inside Antigravity hooks and suppressed empty `Hot: 0 / Warm: 0` boxes on non-code chat turns (zero tokens injected when no files match).
+- **`VerifyFirst` URL false positives (`attnroute.plugins.verifyfirst`)**: Stripped `http(s)://` and `file://` URLs and bounded file-extension regexes so URLs like `https://www.linkedin.com/...` no longer match `.c` as `//www.linkedin.c`.
+
 ## [1.2.0] - 2026-11-19
 
 ### Added

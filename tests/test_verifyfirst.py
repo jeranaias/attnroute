@@ -813,3 +813,13 @@ class TestVerifyFirst:
         state = plugin.load_state()
         assert state["velocity_window"] == []
         assert state["speculative_editing_alert"] is False
+
+    def test_extract_file_references_ignores_urls_and_tlds(self, plugin):
+        """URLs like https://www.linkedin.com must not match `.c` as //www.linkedin.c."""
+        prompt = (
+            "Check https://www.linkedin.com/in/mdmurphy822/ and "
+            "https://example.com/foo.html then edit src/main.c"
+        )
+        refs = plugin._extract_file_references(prompt)
+        assert "src/main.c" in refs
+        assert not any("linkedin" in r or "example" in r for r in refs)

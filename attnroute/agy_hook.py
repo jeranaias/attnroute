@@ -238,21 +238,15 @@ def _handle_pre_invocation(payload: dict[str, Any]) -> dict[str, Any]:
         output, stats = cr.build_context_output(state, docs_root)
         stats["total_chars"] = len(output)
 
-        if cr.PLUGINS_AVAILABLE:
-            for plugin in cr.get_plugins():
-                try:
-                    extra = plugin.on_prompt_post(prompt, output, state)
-                    if extra:
-                        output = output + extra
-                except Exception:
-                    pass
-
         cr.append_history(state, prev_state, activated, prompt, stats)
         cr.save_state(state_file, state)
 
-        if output and output.strip():
-            return {"injectSteps": [_inject_step(output)]}
-        return {}
+        # Skip Claude-Code-specific plugins (BurnRate reads ~/.claude/projects,
+        # VerifyFirst tracks Claude Read/Edit tool calls) and stay completely
+        # silent on zero-hit conversational turns so chat turns pay 0 tokens.
+        if (stats.get("hot", 0) == 0 and stats.get("warm", 0) == 0) or not output.strip():
+            return {}
+        return {"injectSteps": [_inject_step(output)]}
     finally:
         try:
             os.chdir(old_cwd)
